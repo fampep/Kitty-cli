@@ -1,4 +1,18 @@
 #!/usr/bin/env node
+/*
+ * KittyCLI – Anime aggregator terminal client
+ * Copyright (C) 2026 fampep
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
 
 import axios from 'axios';
 import { spawn, execSync } from 'child_process';
@@ -6,9 +20,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
-import { promisify } from 'util';
 
-const execPromise = promisify(execSync);
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 const C = {
@@ -36,7 +48,7 @@ const C = {
 };
 
 const APP_VERSION = "1.8.5";
-const GITHUB_REPO = "fampep/anikoto-cli";
+const GITHUB_REPO = "fampep/Kitty-cli";
 const VERSION_CHECK_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 
 const DATA_DIR = path.join(os.homedir(), '.kittycli');
@@ -1244,7 +1256,7 @@ async function triggerProviderOverviewWorkflow(providersList) {
 async function showAbout(providersCount, apiUrl) {
     clearScreen();
     renderHeader("KITTYCLI", `version ${APP_VERSION}`);
-    const content = [`${C.bold}Anime aggregator terminal client${C.reset}`, `${C.dim}──────────────────────────────────────${C.reset}`, `Version: ${APP_VERSION}`, `Node.js ${process.version}`, `Providers: ${providersCount}`, `API: ${apiUrl}`, `Data: ${DATA_DIR}`, ``, `${C.bold}Features:${C.reset}`, `  • Multi‑provider search & streaming`, `  • Watchlist with progress tracking`, `  • Download episodes (HTTP / HLS)`, `  • Resumable downloads (HTTP)`, `  • Batch download episode ranges`, `  • Persistent search history`, `  • Binge mode with countdown & audio toggle`, `  • Quick resume last watched`, `  • Default audio preference`, `  • Copy stream URL to clipboard`, `  • Custom mpv arguments`, `  • Playback speed control`, `  • Subtitle download`, `  • Anime metadata panel`, `  • Smart fuzzy search`, `  • Search result caching`, `  • Auto-update check`, ``, `${C.bold}Player:${C.reset}`, `  mpv (only player supported)`, ``, `${C.bold}Credits:${C.reset}`, `  Based on Anikoto API`, ``, `${C.dim}Licensed under MIT${C.reset}`];
+    const content = [`${C.bold}Anime aggregator terminal client${C.reset}`, `${C.dim}──────────────────────────────────────${C.reset}`, `Version: ${APP_VERSION}`, `Node.js ${process.version}`, `Providers: ${providersCount}`, `API: ${apiUrl}`, `Data: ${DATA_DIR}`, ``, `${C.bold}Features:${C.reset}`, `  • Multi‑provider search & streaming`, `  • Watchlist with progress tracking`, `  • Download episodes (HTTP / HLS)`, `  • Resumable downloads (HTTP)`, `  • Batch download episode ranges`, `  • Persistent search history`, `  • Binge mode with countdown & audio toggle`, `  • Quick resume last watched`, `  • Default audio preference`, `  • Copy stream URL to clipboard`, `  • Custom mpv arguments`, `  • Playback speed control`, `  • Subtitle download`, `  • Anime metadata panel`, `  • Smart fuzzy search`, `  • Search result caching`, `  • Auto-update check`, ``, `${C.bold}Player:${C.reset}`, `  mpv (only player supported)`, ``, `${C.bold}Credits:${C.reset}`, `  Based on Anikoto API`, ``, `${C.dim}Licensed under GPL-3.0${C.reset}`];
     renderBox("About", content, C.cyan);
     await pauseForKey();
 }
@@ -1264,7 +1276,7 @@ async function terminalEngine() {
         const latest = await checkForUpdates();
         if (latest) {
             console.log(`\n${C.yellow}[UPDATE] New version available: ${latest} (current: ${APP_VERSION})${C.reset}`);
-            console.log(`${C.dim}Run 'npm update -g anikoto-cli' or visit github.com/${GITHUB_REPO}/releases.${C.reset}\n`);
+            console.log(`${C.dim}Run 'npm update -g kittycli' or visit github.com/${GITHUB_REPO}/releases.${C.reset}\n`);
             await wait(2000);
         }
     }
