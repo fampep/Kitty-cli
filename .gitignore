@@ -1,0 +1,29 @@
+# Node modules
+node_modules/
+
+# Data directory created by KittyCLI
+.kittycli/
+*.log
+npm-debug.log*
+
+# Environment variables
+.env
+.env.local
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+
+# Package lock (optional – keep or ignore)
+package-lock.json
