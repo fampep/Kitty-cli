@@ -1,5 +1,5 @@
 {
-  "name": "kittycli",
+  "name": "@fampep/kittycli",
   "version": "1.8.5",
   "description": "Anime aggregator terminal client with multi-provider support",
   "main": "kittycli.js",
@@ -12,6 +12,7 @@
     "release": "npm version patch && git push --follow-tags"
   },
   "dependencies": {
+    "@fampep/kittycli": "^1.8.5",
     "axios": "^1.7.0"
   },
   "keywords": [
