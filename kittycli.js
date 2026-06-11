@@ -6,6 +6,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import DiscordRPC from 'discord-rpc';
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -33,9 +34,10 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.2.1";
+const APP_VERSION = "2.2.2";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
+const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
 
 const DATA_DIR = path.join(os.homedir(), '.kittycli');
 const WATCHLIST_PATH = path.join(DATA_DIR, 'watchlist.json');
@@ -56,8 +58,54 @@ const defaultSettings = {
     mpvArgs: "",
     playbackSpeed: 1.0,
     enableUpdateCheck: true,
-    autoPlayNext: false
+    autoPlayNext: false,
+    discordEnabled: false,
+    discordClientId: "1511784156340818222"
 };
+
+// Discord RPC instance (singleton)
+let discordRpc = null;
+let discordReady = false;
+
+function initDiscordRpc(clientId) {
+    if (discordRpc) return;
+    DiscordRPC.register(clientId);
+    discordRpc = new DiscordRPC.Client({ transport: 'ipc' });
+    discordRpc.on('ready', () => {
+        discordReady = true;
+        console.log(`  ${C.green}✓ Discord RPC connected${C.reset}`);
+    });
+    discordRpc.login({ clientId }).catch(err => {
+        console.log(`  ${C.yellow}⚠ Discord RPC failed: ${err.message}${C.reset}`);
+        discordReady = false;
+    });
+}
+
+function setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, streamUrl) {
+    if (!discordReady || !discordRpc) return;
+    const state = totalEpisodes
+        ? `Episode ${episodeNum}/${totalEpisodes} · ${audio.toUpperCase()}`
+        : `Episode ${episodeNum} · ${audio.toUpperCase()}`;
+    discordRpc.setActivity({
+        details: `Watching ${animeTitle}`,
+        state: state,
+        startTimestamp: Date.now(),
+        largeImageKey: 'kitty_logo',   // You MUST upload this asset in your Discord Developer app
+        largeImageText: 'KittyCLI',
+        smallImageKey: 'play',
+        smallImageText: 'Streaming',
+        buttons: [
+            { label: '🎬 Watch Episode', url: streamUrl },
+            { label: '🐱 GitHub', url: GITHUB_URL }
+        ],
+        instance: false
+    }).catch(err => console.error('Discord RPC setActivity error:', err));
+}
+
+function clearDiscordPresence() {
+    if (!discordReady || !discordRpc) return;
+    discordRpc.clearActivity().catch(err => console.error('Discord RPC clear error:', err));
+}
 
 function levenshteinDistance(a, b) {
     const matrix = [];
@@ -208,7 +256,9 @@ function loadSettings() {
         mpvArgs: typeof stored.mpvArgs === "string" ? stored.mpvArgs : defaultSettings.mpvArgs,
         playbackSpeed: typeof stored.playbackSpeed === "number" ? Math.min(Math.max(stored.playbackSpeed, 0.5), 3.0) : 1.0,
         enableUpdateCheck: typeof stored.enableUpdateCheck === "boolean" ? stored.enableUpdateCheck : true,
-        autoPlayNext: typeof stored.autoPlayNext === "boolean" ? stored.autoPlayNext : false
+        autoPlayNext: typeof stored.autoPlayNext === "boolean" ? stored.autoPlayNext : false,
+        discordEnabled: typeof stored.discordEnabled === "boolean" ? stored.discordEnabled : false,
+        discordClientId: typeof stored.discordClientId === "string" && stored.discordClientId.trim() ? stored.discordClientId.trim() : defaultSettings.discordClientId
     };
 }
 
@@ -233,7 +283,10 @@ function deleteSearchHistoryItem(index) {
 
 function clearSearchHistory() { try { if (fs.existsSync(SEARCH_HISTORY_PATH)) fs.rmSync(SEARCH_HISTORY_PATH, { force: true }); } catch(e) {} }
 
-function clearScreen() { process.stdout.write('\x1b[H\x1b[J'); }
+function clearScreen() {
+    console.clear();
+}
+
 function stripAnsi(value) { return value.replace(/\x1b\[[0-9;]*m/g, ""); }
 function visibleLength(value) { return stripAnsi(value).length; }
 function padRightVisible(value, width) { return value + " ".repeat(Math.max(0, width - visibleLength(value))); }
@@ -391,10 +444,18 @@ async function downloadSubtitle(subtitleUrl, outputPath) {
     } catch(e) { return false; }
 }
 
-async function playWithMpv(stream, displayTitle, settings) {
+async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNum, totalEpisodes, audio) {
     if (!isMpvAvailable()) {
         renderBox("error", ["mpv not installed. cannot play video."], C.red);
         return false;
+    }
+    // Initialize Discord RPC if enabled and not already connected
+    if (settings.discordEnabled && !discordRpc) {
+        initDiscordRpc(settings.discordClientId);
+        await wait(500);
+    }
+    if (settings.discordEnabled && discordReady && stream && stream.file) {
+        setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, stream.file);
     }
     return new Promise((resolve) => {
         console.log(`\n  ${C.cyan}◈${C.reset} ${C.bold}launching mpv...${C.reset}`);
@@ -414,8 +475,17 @@ async function playWithMpv(stream, displayTitle, settings) {
             args = [...baseArgs, ...extra];
         }
         const mpv = spawn('mpv', args, { stdio: 'inherit' });
-        mpv.on('close', (code) => resolve(code === 0));
-        mpv.on('error', (err) => { console.log(`  ${C.red}✗ mpv error: ${err.message}${C.reset}`); resolve(false); });
+        mpv.on('close', (code) => {
+            if (settings.discordEnabled && discordReady) {
+                clearDiscordPresence();
+            }
+            resolve(code === 0);
+        });
+        mpv.on('error', (err) => { 
+            console.log(`  ${C.red}✗ mpv error: ${err.message}${C.reset}`);
+            if (settings.discordEnabled && discordReady) clearDiscordPresence();
+            resolve(false); 
+        });
     });
 }
 
@@ -604,6 +674,8 @@ async function batchDownloadQueue(jobs, coreTitle, statusBar) {
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const askQuestion = (q) => new Promise(res => rl.question(q, res));
 
+let renderScheduled = false;
+
 async function selectMenuOption(options, title, config = {}) {
     return new Promise((resolve) => {
         if (options.length === 0) { resolve(-1); return; }
@@ -624,6 +696,7 @@ async function selectMenuOption(options, title, config = {}) {
         process.stdin.setRawMode(true);
         readline.emitKeypressEvents(process.stdin);
         const W = process.stdout.columns || 100;
+        
         const renderMenu = () => {
             clearScreen();
             console.log(title);
@@ -649,10 +722,20 @@ async function selectMenuOption(options, title, config = {}) {
             console.log(`  ${C.dim}${footerParts.join("  ·  ")}${C.reset}`);
             if (config.statusBar) renderStatusBar(config.statusBar.providersCount, config.statusBar.apiUrl);
         };
+        
+        const scheduleRender = () => {
+            if (renderScheduled) return;
+            renderScheduled = true;
+            setTimeout(() => {
+                renderMenu();
+                renderScheduled = false;
+            }, 10);
+        };
+        
         const keyHandler = (_str, key) => {
             if (resolved) return;
             if (key && key.name === '?' && !key.ctrl && !key.meta) {
-                showHelpGuide().then(() => renderMenu());
+                showHelpGuide().then(() => scheduleRender());
                 return;
             }
             const page = Math.floor(currentPos / pageSize);
@@ -662,21 +745,27 @@ async function selectMenuOption(options, title, config = {}) {
             if (quickPick >= 0 && quickPick < visibleCount) {
                 currentPos = pageStart + quickPick;
                 resolved = true; cleanup(); resolve(currentPos);
-            } else if (key.name === 'up') { currentPos = currentPos > 0 ? currentPos - 1 : options.length - 1; renderMenu(); }
-            else if (key.name === 'down') { currentPos = currentPos < options.length - 1 ? currentPos + 1 : 0; renderMenu(); }
-            else if (key.name === 'left' || key.name === 'pageup') { currentPos = Math.max(0, currentPos - pageSize); renderMenu(); }
-            else if (key.name === 'right' || key.name === 'pagedown') { currentPos = Math.min(options.length - 1, currentPos + pageSize); renderMenu(); }
-            else if (key.name === 'home') { currentPos = 0; renderMenu(); }
-            else if (key.name === 'end') { currentPos = options.length - 1; renderMenu(); }
+            } else if (key.name === 'up') { currentPos = currentPos > 0 ? currentPos - 1 : options.length - 1; scheduleRender(); }
+            else if (key.name === 'down') { currentPos = currentPos < options.length - 1 ? currentPos + 1 : 0; scheduleRender(); }
+            else if (key.name === 'left' || key.name === 'pageup') { currentPos = Math.max(0, currentPos - pageSize); scheduleRender(); }
+            else if (key.name === 'right' || key.name === 'pagedown') { currentPos = Math.min(options.length - 1, currentPos + pageSize); scheduleRender(); }
+            else if (key.name === 'home') { currentPos = 0; scheduleRender(); }
+            else if (key.name === 'end') { currentPos = options.length - 1; scheduleRender(); }
             else if (key.name === 'return') { resolved = true; cleanup(); resolve(currentPos); }
             else if (config.allowBack && (key.name === 'escape' || key.name === 'q')) { resolved = true; cleanup(); resolve(-1); }
             else if (key.ctrl && key.name === 'c') { cleanup(); process.exit(0); }
         };
-        const cleanup = () => { process.stdin.removeListener('keypress', keyHandler); process.stdin.setRawMode(isRaw); };
+        
+        const cleanup = () => { 
+            process.stdin.removeListener('keypress', keyHandler); 
+            process.stdin.setRawMode(isRaw); 
+        };
+        
         renderMenu();
         process.stdin.on('keypress', keyHandler);
     });
 }
+
 async function showHelpGuide() {
     clearScreen();
     renderHeader("HELP GUIDE", `kittycli v${APP_VERSION}`);
@@ -699,6 +788,7 @@ async function showHelpGuide() {
         `  ${C.green}◈${C.reset} anime metadata panel (anilist)`,
         `  ${C.green}◈${C.reset} fuzzy search ranking`,
         `  ${C.green}◈${C.reset} playback speed control`,
+        `  ${C.green}◈${C.reset} Discord Rich Presence with GitHub button`,
         ``,
         `${C.bold}${C.cyan}player${C.reset}`,
         `  mpv  (only supported player)`,
@@ -866,7 +956,7 @@ async function fetchProviderList(apiBaseUrl) {
         return providers.filter(p => p.online).map(p => p.name);
     } catch (err) {
         console.error("failed to fetch provider list from api, using fallback list.");
-        return ["Miruro", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise"];
+       return ["Miruro", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
     }
 }
 
@@ -1219,7 +1309,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                 `${C.dim}${selectedProvider.name}  ·  ${selectedServerName}  ·${C.reset}  ${audioTag}  ${C.dim}·  ${settings.playbackSpeed}x${C.reset}`
             ], C.green);
             saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker);
-            await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings);
+            await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio);
             if (targetEpisode < maxEpNum) {
                 console.log(`\n  ${C.green}✓ episode ${targetEpisode} done${C.reset}`);
                 const nextTitle = titleMap.get(targetEpisode + 1) || "";
@@ -1386,6 +1476,8 @@ async function triggerSettingsWorkflow(providersCount) {
             `api base url      ${C.dim}${settings.apiBaseUrl}${C.reset}`,
             `auto-update       ${settings.enableUpdateCheck ? `${C.green}on${C.reset}` : `${C.dim}off${C.reset}`}`,
             `auto-play next    ${settings.autoPlayNext ? `${C.green}on${C.reset}` : `${C.dim}off${C.reset}`}`,
+            `discord presence  ${settings.discordEnabled ? `${C.green}on${C.reset}` : `${C.dim}off${C.reset}`}`,
+            `discord client id ${C.dim}${settings.discordClientId}${C.reset}`,
             `${C.dim}clear recent searches${C.reset}`,
             `${C.dim}reset all settings${C.reset}`,
             `${C.dim}go back${C.reset}`
@@ -1401,8 +1493,13 @@ async function triggerSettingsWorkflow(providersCount) {
         else if (idx === 6) { const newUrl = await askQuestion(`\n  ${C.yellow}api base url${C.reset}  ${C.bold}›${C.reset} `); if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("saved", [`api url → ${settings.apiBaseUrl}`], C.green); await wait(1500); } }
         else if (idx === 7) { settings.enableUpdateCheck = !settings.enableUpdateCheck; saveSettings(settings); renderBox("updated", [`auto-update ${settings.enableUpdateCheck ? "enabled" : "disabled"}`], C.green); await wait(1000); }
         else if (idx === 8) { settings.autoPlayNext = !settings.autoPlayNext; saveSettings(settings); renderBox("updated", [`auto-play next: ${settings.autoPlayNext ? "on" : "off"}`], C.green); await wait(1000); }
-        else if (idx === 9) { clearSearchHistory(); renderBox("done", ["searches cleared."], C.green); await wait(1000); }
-        else if (idx === 10) { saveSettings(defaultSettings); renderBox("done", ["settings reset to defaults."], C.green); await wait(1000); }
+        else if (idx === 9) { settings.discordEnabled = !settings.discordEnabled; saveSettings(settings); renderBox("updated", [`Discord presence ${settings.discordEnabled ? "enabled" : "disabled"}`], C.green); await wait(1000); }
+        else if (idx === 10) {
+            const newId = await askQuestion(`\n  ${C.yellow}Discord client ID${C.reset}  ${C.bold}›${C.reset} `);
+            if (newId.trim()) { settings.discordClientId = newId.trim(); saveSettings(settings); renderBox("saved", ["client ID updated."], C.green); await wait(1500); }
+        }
+        else if (idx === 11) { clearSearchHistory(); renderBox("done", ["searches cleared."], C.green); await wait(1000); }
+        else if (idx === 12) { saveSettings(defaultSettings); renderBox("done", ["settings reset to defaults."], C.green); await wait(1000); }
     }
 }
 
@@ -1446,6 +1543,7 @@ async function showAbout(providersCount, apiUrl) {
         `  ${C.green}◈${C.reset} anilist metadata panel`,
         `  ${C.green}◈${C.reset} playback speed & mpv args`,
         `  ${C.green}◈${C.reset} clipboard url copy`,
+        `  ${C.green}◈${C.reset} Discord Rich Presence with GitHub button`,
         ``,
         `${C.dim}gpl-3.0 · based on anikoto api${C.reset}`
     ];
@@ -1501,6 +1599,7 @@ async function terminalEngine() {
         console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}watchlist${C.reset}  ${C.bold}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 16 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
         console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}searches ${C.reset}  ${C.bold}${historyCount}${C.reset} saved${" ".repeat(W - 16 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
         console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}api      ${C.reset}  ${C.yellow}${settings.apiBaseUrl}${C.reset}${" ".repeat(Math.max(0, W - 11 - settings.apiBaseUrl.length))}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}discord   ${C.reset}  ${settings.discordEnabled ? `${C.green}● on${C.reset}` : `${C.dim}○ off${C.reset}`}${" ".repeat(W - 16)}${C.bold}${C.green}│${C.reset}`);
         console.log(`  ${C.bold}${C.green}╰${"─".repeat(W)}╯${C.reset}\n`);
         const mainOptions = [
             `${C.bold}search anime${C.reset}            ${C.dim}find & stream anything${C.reset}`,
