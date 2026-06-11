@@ -637,9 +637,9 @@ async function selectMenuOption(options, title, config = {}) {
                 if (idx === currentPos) {
                     const raw = stripAnsi(opt);
                     const padded = raw.length < W - 8 ? opt + " ".repeat(W - 8 - raw.length) : opt;
-                    console.log(`  ${C.bgGreen}${C.black}${C.bold} ❯ ${numberHint}${C.black}  ${padded} ${C.reset}`);
+                    console.log(`  ${C.bgGreen}${C.green}${C.bold} > ${numberHint}${C.green}  ${padded} ${C.reset}`);
                 } else {
-                    console.log(`  ${C.dim}  ${numberHint}${C.reset}  ${opt}`);
+                    console.log(`  ${C.white}${C.dim}  ${numberHint}${C.reset}  ${opt}${C.reset}`);
                 }
             });
             console.log();
@@ -677,7 +677,6 @@ async function selectMenuOption(options, title, config = {}) {
         process.stdin.on('keypress', keyHandler);
     });
 }
-
 async function showHelpGuide() {
     clearScreen();
     renderHeader("HELP GUIDE", `kittycli v${APP_VERSION}`);
