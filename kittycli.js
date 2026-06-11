@@ -6,6 +6,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import net from 'net';
 import DiscordRPC from 'discord-rpc';
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -34,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.2.2";
+const APP_VERSION = "2.4.0";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -43,16 +44,15 @@ const DATA_DIR = path.join(os.homedir(), '.kittycli');
 const WATCHLIST_PATH = path.join(DATA_DIR, 'watchlist.json');
 const SEARCH_HISTORY_PATH = path.join(DATA_DIR, 'search-history.json');
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
-const CACHE_PATH = path.join(DATA_DIR, 'cache.json');
+const PROGRESS_PATH = path.join(DATA_DIR, 'progress.json');
 
 if (!fs.existsSync(DATA_DIR)) {
     try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch(e) {}
 }
 
 const defaultSettings = {
-    defaultAction: "ask",
-    bingeCountdownSeconds: 10,
-    pageSize: 12,
+    bingeCountdownSeconds: 8,
+    pageSize: 10,
     apiBaseUrl: "https://fampepanikotoapi.buzz",
     defaultAudio: "sub",
     mpvArgs: "",
@@ -60,12 +60,34 @@ const defaultSettings = {
     enableUpdateCheck: true,
     autoPlayNext: false,
     discordEnabled: false,
-    discordClientId: "1511784156340818222"
+    discordClientId: "1511784156340818222",
+    downloadDir: path.join(os.homedir(), 'Downloads'),
+    downloadConcurrency: 2,
+    resumePlayback: true,
+    preferredQuality: "auto",
+    cacheTTL: 600000, // 10 minutes
+    cacheMaxSize: 50
 };
 
-// Discord RPC instance (singleton)
 let discordRpc = null;
 let discordReady = false;
+const DEBUG = process.argv.includes('--debug');
+function debugLog(...args) { if (DEBUG) console.error('[DEBUG]', ...args); }
+
+// Caches with TTL and size limits
+let searchCache = new Map();
+let episodeListCache = new Map();
+
+function cleanCache(cache, maxSize, ttl) {
+    const now = Date.now();
+    for (const [key, value] of cache.entries()) {
+        if (now - value.timestamp > ttl) cache.delete(key);
+    }
+    if (cache.size > maxSize) {
+        const oldest = Array.from(cache.entries()).sort((a,b) => a[1].timestamp - b[1].timestamp);
+        for (let i = 0; i < oldest.length - maxSize; i++) cache.delete(oldest[i][0]);
+    }
+}
 
 function initDiscordRpc(clientId) {
     if (discordRpc) return;
@@ -90,7 +112,7 @@ function setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, stream
         details: `Watching ${animeTitle}`,
         state: state,
         startTimestamp: Date.now(),
-        largeImageKey: 'kitty_logo',   // You MUST upload this asset in your Discord Developer app
+        largeImageKey: 'kitty_logo',
         largeImageText: 'KittyCLI',
         smallImageKey: 'play',
         smallImageText: 'Streaming',
@@ -105,6 +127,17 @@ function setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, stream
 function clearDiscordPresence() {
     if (!discordReady || !discordRpc) return;
     discordRpc.clearActivity().catch(err => console.error('Discord RPC clear error:', err));
+}
+
+function sendNotification(title, message) {
+    const plat = os.platform();
+    if (plat === 'linux') {
+        try { execSync(`notify-send "${title}" "${message}"`, { stdio: 'ignore' }); } catch(e) {}
+    } else if (plat === 'darwin') {
+        try { execSync(`osascript -e 'display notification "${message}" with title "${title}"'`, { stdio: 'ignore' }); } catch(e) {}
+    } else if (plat === 'win32') {
+        try { execSync(`msg "%username%" "${title}: ${message}"`, { stdio: 'ignore' }); } catch(e) {}
+    }
 }
 
 function levenshteinDistance(a, b) {
@@ -134,11 +167,6 @@ function similarityScore(a, b) {
 function stripHtmlTags(text) {
     return text.replace(/<[^>]*>/g, '');
 }
-
-function loadCache() { return []; }
-function saveCache() {}
-function getCachedSearch() { return null; }
-function setCachedSearch() {}
 
 async function checkForUpdates() {
     try {
@@ -200,7 +228,18 @@ function saveWatchlist(list) {
     try { fs.writeFileSync(WATCHLIST_PATH, JSON.stringify(list, null, 2), 'utf8'); } catch(e) {}
 }
 
-function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId) {
+function loadProgress() {
+    try {
+        if (fs.existsSync(PROGRESS_PATH)) return JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
+    } catch(e) {}
+    return {};
+}
+
+function saveProgress(progress) {
+    try { fs.writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2), 'utf8'); } catch(e) {}
+}
+
+function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId, position = 0, quality = null) {
     try {
         const list = loadWatchlist();
         const existingIdx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
@@ -210,14 +249,40 @@ function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, 
             hasSub: m.item.hasSub,
             hasDub: m.item.hasDub
         }));
-        const newItem = { title, lastEpisode: episode, audio, timestamp: new Date().toLocaleDateString(), matches: matchesData, totalEpisodes, anilistId };
+        const newItem = { title, lastEpisode: episode, audio, timestamp: new Date().toLocaleDateString(), matches: matchesData, totalEpisodes, anilistId, position, quality };
         if (existingIdx !== -1) {
             if (totalEpisodes === undefined && list[existingIdx].totalEpisodes) newItem.totalEpisodes = list[existingIdx].totalEpisodes;
             if (anilistId === undefined && list[existingIdx].anilistId) newItem.anilistId = list[existingIdx].anilistId;
+            newItem.position = position || list[existingIdx].position || 0;
+            newItem.quality = quality || list[existingIdx].quality || null;
             list[existingIdx] = newItem;
         } else list.unshift(newItem);
         saveWatchlist(list);
     } catch(e) {}
+}
+
+function updateWatchlistPosition(title, episode, position) {
+    const list = loadWatchlist();
+    const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+    if (idx !== -1 && list[idx].lastEpisode === episode) {
+        list[idx].position = position;
+        saveWatchlist(list);
+    }
+    const progress = loadProgress();
+    const key = `${title}|${episode}`;
+    progress[key] = position;
+    saveProgress(progress);
+}
+
+function getResumePosition(title, episode) {
+    const list = loadWatchlist();
+    const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+    if (idx !== -1 && list[idx].lastEpisode === episode && list[idx].position) {
+        return list[idx].position;
+    }
+    const progress = loadProgress();
+    const key = `${title}|${episode}`;
+    return progress[key] || 0;
 }
 
 function deleteWatchlistItem(index) {
@@ -228,7 +293,7 @@ function deleteWatchlistItem(index) {
 function updateWatchlistEpisode(title, newEpisode) {
     const list = loadWatchlist();
     const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
-    if (idx !== -1) { list[idx].lastEpisode = newEpisode; saveWatchlist(list); }
+    if (idx !== -1) { list[idx].lastEpisode = newEpisode; list[idx].position = 0; saveWatchlist(list); }
 }
 
 function updateWatchlistAudio(title, audio) {
@@ -248,7 +313,6 @@ function writeJsonFile(filePath, value) { try { fs.writeFileSync(filePath, JSON.
 function loadSettings() {
     const stored = readJsonFile(SETTINGS_PATH, {});
     return {
-        defaultAction: stored.defaultAction === "stream" || stored.defaultAction === "download" ? stored.defaultAction : "ask",
         bingeCountdownSeconds: typeof stored.bingeCountdownSeconds === "number" ? Math.min(Math.max(stored.bingeCountdownSeconds, 3), 120) : defaultSettings.bingeCountdownSeconds,
         pageSize: typeof stored.pageSize === "number" ? Math.min(Math.max(stored.pageSize, 6), 20) : defaultSettings.pageSize,
         apiBaseUrl: typeof stored.apiBaseUrl === "string" && stored.apiBaseUrl.trim() ? stored.apiBaseUrl.trim() : defaultSettings.apiBaseUrl,
@@ -258,7 +322,13 @@ function loadSettings() {
         enableUpdateCheck: typeof stored.enableUpdateCheck === "boolean" ? stored.enableUpdateCheck : true,
         autoPlayNext: typeof stored.autoPlayNext === "boolean" ? stored.autoPlayNext : false,
         discordEnabled: typeof stored.discordEnabled === "boolean" ? stored.discordEnabled : false,
-        discordClientId: typeof stored.discordClientId === "string" && stored.discordClientId.trim() ? stored.discordClientId.trim() : defaultSettings.discordClientId
+        discordClientId: typeof stored.discordClientId === "string" && stored.discordClientId.trim() ? stored.discordClientId.trim() : defaultSettings.discordClientId,
+        downloadDir: typeof stored.downloadDir === "string" && stored.downloadDir.trim() ? stored.downloadDir.trim() : defaultSettings.downloadDir,
+        downloadConcurrency: typeof stored.downloadConcurrency === "number" ? Math.min(Math.max(stored.downloadConcurrency, 1), 5) : defaultSettings.downloadConcurrency,
+        resumePlayback: typeof stored.resumePlayback === "boolean" ? stored.resumePlayback : true,
+        preferredQuality: typeof stored.preferredQuality === "string" ? stored.preferredQuality : defaultSettings.preferredQuality,
+        cacheTTL: typeof stored.cacheTTL === "number" ? stored.cacheTTL : defaultSettings.cacheTTL,
+        cacheMaxSize: typeof stored.cacheMaxSize === "number" ? stored.cacheMaxSize : defaultSettings.cacheMaxSize
     };
 }
 
@@ -359,6 +429,7 @@ function resolveEpisodeDataIds(epObj) {
     if (epObj.dataIds != null) return epObj.dataIds;
     if (epObj.id != null) return epObj.id;
     if (epObj.episodeId != null) return epObj.episodeId;
+    if (epObj.episode_id != null) return epObj.episode_id;
     if (epObj.data_id != null) return epObj.data_id;
     if (epObj.dataId != null) return epObj.dataId;
     if (epObj.sourceId != null) return epObj.sourceId;
@@ -366,11 +437,18 @@ function resolveEpisodeDataIds(epObj) {
     return null;
 }
 
+function parseEpisodeNumber(ep) {
+    let num = ep.number ?? ep.episode ?? ep.num;
+    if (typeof num === 'string') num = parseInt(num, 10);
+    if (typeof num === 'number' && !isNaN(num)) return num;
+    return null;
+}
+
 function getWatchlistInfo(title) {
     const list = loadWatchlist();
     const normalized = normalizeTitle(title);
     const item = list.find(i => normalizeTitle(i.title) === normalized);
-    if (item) return { lastEpisode: item.lastEpisode, totalEpisodes: item.totalEpisodes, audio: item.audio, anilistId: item.anilistId };
+    if (item) return { lastEpisode: item.lastEpisode, totalEpisodes: item.totalEpisodes, audio: item.audio, anilistId: item.anilistId, position: item.position || 0, quality: item.quality || null };
     return null;
 }
 
@@ -417,23 +495,21 @@ async function withSpinner(message, task) {
     }
 }
 
+async function withRetry(fn, retries = 3, delay = 1000) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (err) {
+            debugLog(`Retry ${i+1}/${retries} failed:`, err.message);
+            if (i === retries - 1) throw err;
+            await wait(delay * Math.pow(2, i));
+        }
+    }
+}
+
 function isMpvAvailable() {
     const cmd = os.platform() === "win32" ? "where mpv" : "which mpv";
     try { execSync(cmd, { stdio: 'ignore' }); return true; } catch(e) { return false; }
-}
-
-async function copyToClipboard(text) {
-    return new Promise((resolve) => {
-        let cmd, args;
-        if (os.platform() === 'darwin') { cmd = 'pbcopy'; args = []; }
-        else if (os.platform() === 'win32') { cmd = 'clip'; args = []; }
-        else { cmd = 'xclip'; args = ['-selection', 'clipboard']; }
-        const proc = spawn(cmd, args, { stdio: 'pipe' });
-        proc.stdin.write(text);
-        proc.stdin.end();
-        proc.on('close', (code) => resolve(code === 0));
-        proc.on('error', () => resolve(false));
-    });
 }
 
 async function downloadSubtitle(subtitleUrl, outputPath) {
@@ -444,38 +520,107 @@ async function downloadSubtitle(subtitleUrl, outputPath) {
     } catch(e) { return false; }
 }
 
+function selectQuality(qualities, preferred) {
+    if (!qualities || qualities.length === 0) return null;
+    // Sort by resolution descending (1080p > 720p > 480p...)
+    const sorted = [...qualities].sort((a,b) => {
+        const getHeight = (q) => {
+            const match = q.match(/(\d+)p/);
+            return match ? parseInt(match[1]) : 0;
+        };
+        return getHeight(b) - getHeight(a);
+    });
+    if (preferred === 'auto') return sorted[0];
+    const found = sorted.find(q => q.toLowerCase().includes(preferred.toLowerCase()));
+    return found || sorted[0];
+}
+
 async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNum, totalEpisodes, audio) {
     if (!isMpvAvailable()) {
         renderBox("error", ["mpv not installed. cannot play video."], C.red);
         return false;
     }
-    // Initialize Discord RPC if enabled and not already connected
-    if (settings.discordEnabled && !discordRpc) {
-        initDiscordRpc(settings.discordClientId);
-        await wait(500);
-    }
     if (settings.discordEnabled && discordReady && stream && stream.file) {
         setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, stream.file);
     }
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
         console.log(`\n  ${C.cyan}◈${C.reset} ${C.bold}launching mpv...${C.reset}`);
-        const baseArgs = [
+        const referrer = stream.headers?.Referer || stream.referer || '';
+        const origin = stream.headers?.Origin || stream.origin || '';
+        let baseArgs = [
             stream.file,
-            `--referrer=${stream.headers.Referer}`,
-            `--http-header-fields=Origin: ${stream.headers.Origin}`,
+            `--referrer=${referrer}`,
+            `--http-header-fields=Origin: ${origin}`,
             "--keep-open=no",
             "--save-position-on-quit=yes",
             "--resume-playback=yes",
             `--speed=${settings.playbackSpeed}`,
             `--title=${displayTitle}`
         ];
+        let resumePos = 0;
+        if (settings.resumePlayback) {
+            resumePos = getResumePosition(animeTitle, episodeNum);
+            if (resumePos > 5) {
+                baseArgs.push(`--start=${resumePos}`);
+                console.log(`  ${C.dim}resuming from ${Math.floor(resumePos/60)}:${(resumePos%60).toString().padStart(2,'0')}${C.reset}`);
+            }
+        }
         let args = baseArgs;
         if (settings.mpvArgs && settings.mpvArgs.trim()) {
             const extra = settings.mpvArgs.trim().split(/\s+/);
             args = [...baseArgs, ...extra];
         }
+        // Create IPC socket for precise position tracking
+        const socketPath = path.join(os.tmpdir(), `mpv-socket-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`);
+        args.push(`--input-ipc-server=${socketPath}`);
         const mpv = spawn('mpv', args, { stdio: 'inherit' });
+        let lastPosition = resumePos;
+        let socket = null;
+        let positionInterval = null;
+        let retryCount = 0;
+        const connectSocket = () => {
+            if (!settings.resumePlayback) return;
+            const tryConnect = () => {
+                socket = net.createConnection(socketPath, () => {
+                    debugLog('Connected to mpv IPC');
+                    socket.write(JSON.stringify({ command: ["observe_property", 1, "time-pos"] }) + '\n');
+                    positionInterval = setInterval(() => {
+                        if (socket && !socket.destroyed) {
+                            socket.write(JSON.stringify({ command: ["get_property", "time-pos"] }) + '\n');
+                        }
+                    }, 5000);
+                });
+                socket.on('data', (data) => {
+                    try {
+                        const lines = data.toString().split('\n');
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            const msg = JSON.parse(line);
+                            if (msg.event === 'property-change' && msg.name === 'time-pos' && typeof msg.data === 'number') {
+                                if (msg.data > 5) lastPosition = msg.data;
+                            } else if (msg.request_id === undefined && msg.error === undefined && typeof msg.data === 'number') {
+                                if (msg.data > 5) lastPosition = msg.data;
+                            }
+                        }
+                    } catch(e) {}
+                });
+                socket.on('error', (err) => {
+                    debugLog('IPC socket error:', err.message);
+                    if (retryCount < 3) {
+                        retryCount++;
+                        setTimeout(tryConnect, 1000);
+                    }
+                });
+            };
+            tryConnect();
+        };
+        connectSocket();
         mpv.on('close', (code) => {
+            if (positionInterval) clearInterval(positionInterval);
+            if (socket) socket.destroy();
+            if (settings.resumePlayback && lastPosition > 10 && Math.abs(lastPosition - resumePos) > 5) {
+                updateWatchlistPosition(animeTitle, episodeNum, lastPosition);
+            }
             if (settings.discordEnabled && discordReady) {
                 clearDiscordPresence();
             }
@@ -483,8 +628,13 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
         });
         mpv.on('error', (err) => { 
             console.log(`  ${C.red}✗ mpv error: ${err.message}${C.reset}`);
+            if (positionInterval) clearInterval(positionInterval);
+            if (socket) socket.destroy();
             if (settings.discordEnabled && discordReady) clearDiscordPresence();
             resolve(false); 
+        });
+        mpv.on('exit', () => {
+            if (socket) socket.destroy();
         });
     });
 }
@@ -516,7 +666,7 @@ async function downloadWithFfmpegProgress(url, outputPath) {
         });
         ffmpeg.on('close', (code) => {
             console.log();
-            if (code === 0) { console.log(`  ${C.green}✓ download complete!${C.reset}`); resolve(true); }
+            if (code === 0) { console.log(`  ${C.green}✓ download complete!${C.reset}`); sendNotification('Download Complete', path.basename(outputPath)); resolve(true); }
             else { console.log(`  ${C.red}✗ ffmpeg failed.${C.reset}`); resolve(false); }
         });
         ffmpeg.on('error', (err) => { console.log(`  ${C.red}✗ ffmpeg error: ${err.message}${C.reset}`); resolve(false); });
@@ -524,9 +674,12 @@ async function downloadWithFfmpegProgress(url, outputPath) {
 }
 
 async function resumeableDownload(serverDetails, suggestedFilename, onProgress) {
+    const settings = loadSettings();
     const cleanFilename = suggestedFilename.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();
-    const downloadsDir = path.join(os.homedir(), 'Downloads');
-    const outputDir = fs.existsSync(downloadsDir) ? downloadsDir : process.cwd();
+    const outputDir = settings.downloadDir;
+    if (!fs.existsSync(outputDir)) {
+        try { fs.mkdirSync(outputDir, { recursive: true }); } catch(e) {}
+    }
     const downloadPath = path.join(outputDir, cleanFilename);
     const partPath = downloadPath + '.part';
     const metaPath = downloadPath + '.meta.json';
@@ -547,12 +700,16 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress) 
 
     if (!partial) {
         renderBox("saving to", [downloadPath], C.cyan);
+        const headers = {
+            Referer: serverDetails.headers?.Referer || serverDetails.referer || '',
+            Origin: serverDetails.headers?.Origin || serverDetails.origin || ''
+        };
         partial = {
             url: serverDetails.file,
             outputPath: downloadPath,
             downloadedBytes: 0,
             totalBytes: 0,
-            headers: serverDetails.headers
+            headers: headers
         };
     }
 
@@ -628,6 +785,7 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress) 
                 fs.renameSync(partPath, downloadPath);
                 if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
                 console.log(`  ${C.green}✓ download complete!${C.reset}`);
+                sendNotification('Download Complete', cleanFilename);
                 resolve(true);
             });
 
@@ -648,31 +806,48 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress) 
 }
 
 async function batchDownloadQueue(jobs, coreTitle, statusBar) {
-    console.log(`\n  ${C.bold}${C.green}◈ batch download  ${C.cyan}${jobs.length} episodes${C.reset}\n`);
+    const settings = loadSettings();
+    const concurrency = settings.downloadConcurrency;
+    console.log(`\n  ${C.bold}${C.green}◈ batch download  ${C.cyan}${jobs.length} episodes${C.reset}  ${C.dim}(concurrency: ${concurrency})${C.reset}\n`);
     let successCount = 0, failCount = 0;
-    for (let i = 0; i < jobs.length; i++) {
-        const job = jobs[i];
-        console.log(`  ${C.dim}[${i+1}/${jobs.length}]${C.reset} ${C.cyan}episode ${job.episode}${C.reset}`);
-        try {
-            const stream = await withSpinner(`fetching stream from ${job.provider.name}...`, async () => {
-                return await job.provider.extractStreamFromLinkId(job.serverId);
-            });
-            const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
-            const filename = `${coreTitle} - Episode ${job.episode} (${job.audio.toUpperCase()}).${ext}`;
-            const success = await resumeableDownload(stream, filename);
-            if (success) successCount++;
-            else failCount++;
-        } catch (err) {
-            console.log(`  ${C.red}✗ ${err.message}${C.reset}`);
-            failCount++;
+    let index = 0;
+    async function worker() {
+        while (index < jobs.length) {
+            const i = index++;
+            const job = jobs[i];
+            console.log(`  ${C.dim}[${i+1}/${jobs.length}]${C.reset} ${C.cyan}episode ${job.episode}${C.reset}`);
+            try {
+                const stream = await withSpinner(`fetching stream from ${job.provider.name}...`, async () => {
+                    return await job.provider.extractStreamFromLinkId(job.serverId);
+                });
+                const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
+                const filename = `${coreTitle} - Episode ${job.episode} (${job.audio.toUpperCase()}).${ext}`;
+                const success = await resumeableDownload(stream, filename);
+                if (success) successCount++;
+                else failCount++;
+            } catch (err) {
+                console.log(`  ${C.red}✗ ${err.message}${C.reset}`);
+                failCount++;
+            }
         }
     }
+    const workers = Array(concurrency).fill().map(() => worker());
+    await Promise.all(workers);
     console.log(`\n  ${C.green}✓ ${successCount} done${C.reset}  ${failCount > 0 ? `${C.red}✗ ${failCount} failed${C.reset}` : ''}`);
     await pauseForKey();
 }
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const askQuestion = (q) => new Promise(res => rl.question(q, res));
+
+async function askNumber(prompt, min, max) {
+    while (true) {
+        const raw = await askQuestion(prompt);
+        const num = parseInt(raw.trim(), 10);
+        if (!isNaN(num) && num >= min && num <= max) return num;
+        console.log(`  ${C.red}Please enter a number between ${min} and ${max}.${C.reset}`);
+    }
+}
 
 let renderScheduled = false;
 
@@ -735,7 +910,7 @@ async function selectMenuOption(options, title, config = {}) {
         const keyHandler = (_str, key) => {
             if (resolved) return;
             if (key && key.name === '?' && !key.ctrl && !key.meta) {
-                showHelpGuide().then(() => scheduleRender());
+                showHelp().then(() => scheduleRender());
                 return;
             }
             const page = Math.floor(currentPos / pageSize);
@@ -766,11 +941,11 @@ async function selectMenuOption(options, title, config = {}) {
     });
 }
 
-async function showHelpGuide() {
+async function showHelp() {
     clearScreen();
-    renderHeader("HELP GUIDE", `kittycli v${APP_VERSION}`);
+    renderHeader("KITTYCLI HELP", `v${APP_VERSION}`);
     const content = [
-        `${C.bold}${C.cyan}navigation${C.reset}`,
+        `${C.bold}${C.cyan}Navigation${C.reset}`,
         `  ${C.green}↑ ↓${C.reset}        move through menu`,
         `  ${C.green}↵${C.reset}          select item`,
         `  ${C.green}1 – 9${C.reset}      quick-pick visible row`,
@@ -778,27 +953,31 @@ async function showHelpGuide() {
         `  ${C.green}pgup / pgdn${C.reset} change page`,
         `  ${C.green}?${C.reset}          this help screen`,
         ``,
-        `${C.bold}${C.cyan}features${C.reset}`,
-        `  ${C.green}◈${C.reset} multi-provider parallel search`,
-        `  ${C.green}◈${C.reset} watchlist with episode progress`,
-        `  ${C.green}◈${C.reset} resumable & batch downloads`,
-        `  ${C.green}◈${C.reset} binge mode with audio toggle (A key)`,
-        `  ${C.green}◈${C.reset} copy stream url to clipboard`,
-        `  ${C.green}◈${C.reset} subtitle download`,
-        `  ${C.green}◈${C.reset} anime metadata panel (anilist)`,
-        `  ${C.green}◈${C.reset} fuzzy search ranking`,
-        `  ${C.green}◈${C.reset} playback speed control`,
-        `  ${C.green}◈${C.reset} Discord Rich Presence with GitHub button`,
+        `${C.bold}${C.cyan}Binge mode${C.reset}`,
+        `  ${C.green}Y${C.reset}          continue to next episode now`,
+        `  ${C.green}N${C.reset}          stop binge`,
+        `  ${C.green}A${C.reset}          toggle audio (sub/dub)`,
         ``,
-        `${C.bold}${C.cyan}player${C.reset}`,
-        `  mpv  (only supported player)`,
+        `${C.bold}${C.cyan}Features${C.reset}`,
+        `  • Multi-provider search & streaming`,
+        `  • Watchlist with progress tracking`,
+        `  • Resumable downloads (HTTP + HLS)`,
+        `  • Parallel batch downloads`,
+        `  • Resume playback position (IPC)`,
+        `  • Video quality selection (if available)`,
+        `  • AniList metadata panel`,
+        `  • Discord Rich Presence`,
+        `  • System notifications`,
         ``,
-        `${C.bold}${C.cyan}api${C.reset}`,
-        `  ${C.dim}current:${C.reset} ${C.yellow}${loadSettings().apiBaseUrl}${C.reset}`,
-        `  ${C.dim}change in settings → api base url${C.reset}`
+        `${C.bold}${C.cyan}Tips${C.reset}`,
+        `  • Set "auto-play next" in settings for seamless binge`,
+        `  • Use --debug flag to see verbose logs`,
+        `  • Data stored in ${DATA_DIR}`,
+        ``,
+        `${C.dim}Press any key to return${C.reset}`
     ];
-    renderBox("help", content, C.cyan);
-    return pauseForKey();
+    renderBox("Help & About", content, C.cyan);
+    await pauseForKey();
 }
 
 async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio, nextEpisodeTitle, onAudioToggle, autoPlayNext) {
@@ -806,7 +985,7 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
         return { continue: true };
     }
     if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
-        console.log(`  ${C.yellow}continue to episode ${nextEpisodeNum}? (auto-continue in ${seconds}s)${C.reset}`);
+        console.log(`  ${C.yellow}Next episode in ${seconds}s...${C.reset}`);
         await wait(seconds * 1000);
         return { continue: true };
     }
@@ -820,7 +999,7 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
             const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(24 - filled)}${C.reset}`;
             const audioTag = audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
             const titleDisplay = nextEpisodeTitle ? ` ${C.dim}—${C.reset} ${C.dim}${nextEpisodeTitle}${C.reset}` : "";
-            process.stdout.write(`\r  ${C.bold}${C.green}▶ ep ${nextEpisodeNum}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y continue  N stop  A toggle${C.reset} [${audioTag}]  `);
+            process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶ Episode ${nextEpisodeNum}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y now  N stop  A audio${C.reset} [${audioTag}]  `);
         };
         const timer = setInterval(() => {
             if (resolved) return;
@@ -841,7 +1020,7 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
             if (key === 'y' || key === '\r') {
                 if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(); resolve({ continue: true, newAudio: audio !== currentAudio ? audio : undefined }); }
             } else if (key === 'n') {
-                if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(`\n  ${C.dim}binge stopped.${C.reset}`); resolve({ continue: false }); }
+                if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(`\n  ${C.dim}Binge stopped.${C.reset}`); resolve({ continue: false }); }
             } else if (key === 'a') {
                 audio = audio === "sub" ? "dub" : "sub";
                 onAudioToggle();
@@ -859,8 +1038,8 @@ async function checkApiServer(baseUrl) {
         return true;
     } catch (err) {
         renderBox("connection error", [
-            `cannot reach  ${baseUrl}`,
-            "check the server is running and the url is correct."
+            `Cannot reach ${baseUrl}`,
+            "Check the server is running and the URL is correct."
         ], C.red);
         return false;
     }
@@ -880,7 +1059,7 @@ class ApiProvider {
             });
             return response.data;
         } catch (err) {
-            console.error(`API error for ${this.name}.search:`, err.message);
+            debugLog(`API error for ${this.name}.search:`, err.message);
             return [];
         }
     }
@@ -903,10 +1082,10 @@ class ApiProvider {
                     if (Array.isArray(val) && val.length > 0) return val;
                 }
             }
-            console.warn(`[${this.name}] unexpected episodes response shape. raw:`, JSON.stringify(data).slice(0, 400));
+            debugLog(`[${this.name}] unexpected episodes response shape.`);
             return [];
         } catch (err) {
-            console.error(`API error for ${this.name}.findEpisodes:`, err.message);
+            debugLog(`API error for ${this.name}.findEpisodes:`, err.message);
             return [];
         }
     }
@@ -919,7 +1098,7 @@ class ApiProvider {
             });
             return response.data;
         } catch (err) {
-            console.error(`API error for ${this.name}.findAvailableServers:`, err.message);
+            debugLog(`API error for ${this.name}.findAvailableServers:`, err.message);
             return [];
         }
     }
@@ -941,10 +1120,14 @@ class ApiProvider {
                     }
                 }
             }
+            // Check for quality options
+            if (stream.qualities && Array.isArray(stream.qualities) && stream.qualities.length > 0) {
+                stream.qualities = stream.qualities.map(q => typeof q === 'string' ? q : q.label || q.quality || 'unknown');
+            }
             return stream;
         } catch (err) {
-            console.error(`API error for ${this.name}.extractStreamFromLinkId:`, err.message);
-            throw new Error(`failed to extract stream: ${err.message}`);
+            debugLog(`API error for ${this.name}.extractStreamFromLinkId:`, err.message);
+            throw new Error(`Failed to extract stream: ${err.message}`);
         }
     }
 }
@@ -955,8 +1138,8 @@ async function fetchProviderList(apiBaseUrl) {
         const providers = response.data.providers || [];
         return providers.filter(p => p.online).map(p => p.name);
     } catch (err) {
-        console.error("failed to fetch provider list from api, using fallback list.");
-       return ["Miruro", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
+        debugLog("Failed to fetch provider list from API, using fallback list.");
+        return ["Miruro", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
     }
 }
 
@@ -969,11 +1152,11 @@ async function selectServerTwoStep(providerServersMap, audioLabelText, statusBar
     if (providerServersMap.size === 0) return null;
     const providerEntries = Array.from(providerServersMap.entries());
     const providerOptions = providerEntries.map(([prov, servers]) => `${C.bold}${prov.name}${C.reset}  ${C.dim}${servers.length} server${servers.length !== 1 ? 's' : ''}${C.reset}`);
-    const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ select provider${C.reset}  ${C.dim}(${audioLabelText})${C.reset}`, { allowBack: true, statusBar });
+    const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ Select source${C.reset}  ${C.dim}(${audioLabelText})${C.reset}`, { allowBack: true, statusBar });
     if (providerIdx < 0) return null;
     const [selectedProvider, servers] = providerEntries[providerIdx];
     const serverOptions = servers.map(s => s.name);
-    const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedProvider.name}${C.reset}  ${C.dim}select server${C.reset}`, { allowBack: true, statusBar });
+    const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedProvider.name}${C.reset}  ${C.dim}Select server${C.reset}`, { allowBack: true, statusBar });
     if (serverIdx < 0) return null;
     const selectedServer = servers[serverIdx];
     return { provider: selectedProvider, serverId: selectedServer.id, serverName: selectedServer.name };
@@ -985,7 +1168,8 @@ async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBa
     const effectiveTotal = totalEpisodes || watchInfo?.totalEpisodes || null;
     const episodeOptions = [];
     for (let i = 1; i <= maxEpNum; i++) {
-        let label = effectiveTotal ? `${C.bold}ep ${i}${C.reset}${C.dim}/${effectiveTotal}${C.reset}` : `${C.bold}ep ${i}${C.reset}`;
+        let denominator = effectiveTotal ? `${C.dim}/${effectiveTotal}${C.reset}` : `${C.dim}/?${C.reset}`;
+        let label = `${C.bold}Ep ${i}${C.reset}${denominator}`;
         if (effectiveTotal && effectiveTotal > 0) {
             const percent = Math.round((i / effectiveTotal) * 100);
             const filled = Math.round(percent / 10);
@@ -1003,12 +1187,12 @@ async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBa
         else marker = `${C.dim}·${C.reset} `;
         episodeOptions.push(`${marker}${label}`);
     }
-    const pickedEpIdx = await selectMenuOption(episodeOptions, `\n  ${C.bold}${C.cyan}◈ episodes${C.reset}  ${C.dim}${maxEpNum} available${C.reset}`, { allowBack: true, statusBar });
+    const pickedEpIdx = await selectMenuOption(episodeOptions, `\n  ${C.bold}${C.cyan}◈ Episodes${C.reset}  ${C.dim}${maxEpNum} available${C.reset}`, { allowBack: true, statusBar });
     return pickedEpIdx >= 0 ? pickedEpIdx + 1 : -1;
 }
 
 async function showMetadataPanel(title) {
-    console.log(`\n  ${C.dim}fetching metadata for${C.reset} ${C.bold}"${title}"${C.reset}...`);
+    console.log(`\n  ${C.dim}Fetching metadata for${C.reset} ${C.bold}"${title}"${C.reset}...`);
     const metadata = await fetchAnimeMetadata(title);
     if (metadata) {
         const content = [];
@@ -1020,10 +1204,10 @@ async function showMetadataPanel(title) {
         }
         if (metadata.genres && metadata.genres.length) {
             const genreStr = metadata.genres.map(g => `${C.cyan}${g}${C.reset}`).join(`  ${C.dim}·${C.reset}  `);
-            content.push(`${C.dim}genres${C.reset}   ${genreStr}`);
+            content.push(`${C.dim}Genres${C.reset}   ${genreStr}`);
         }
-        if (metadata.episodes) content.push(`${C.dim}episodes${C.reset} ${C.bold}${metadata.episodes}${C.reset}`);
-        if (metadata.status) content.push(`${C.dim}status${C.reset}   ${C.yellow}${metadata.status}${C.reset}`);
+        if (metadata.episodes) content.push(`${C.dim}Episodes${C.reset} ${C.bold}${metadata.episodes}${C.reset}`);
+        if (metadata.status) content.push(`${C.dim}Status${C.reset}   ${C.yellow}${metadata.status}${C.reset}`);
         if (metadata.synopsis) {
             content.push('');
             const cleanSynopsis = stripHtmlTags(metadata.synopsis);
@@ -1037,32 +1221,41 @@ async function showMetadataPanel(title) {
         }
         renderBox(title, content, C.green);
     } else {
-        renderBox("info", [`no metadata found for "${title}".`], C.dim);
+        renderBox("Info", [`No metadata found for "${title}".`], C.dim);
     }
     console.log(`\n  ${C.dim}1 continue  2 back${C.reset}`);
     const answer = await askQuestion(`\n  ${C.bold}${C.yellow}›${C.reset} `);
-    if (answer.trim() === '1') return metadata;
-    else return null;
+    return answer.trim() === '1' ? metadata : null;
 }
 
 async function triggerSearchWorkflow(initialQuery, providersList) {
     if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
     clearScreen();
     renderHeader("SEARCH", `${providersList.length} providers ready`);
-    const query = initialQuery ?? await askQuestion(`\n  ${C.bold}${C.yellow}›${C.reset} `);
+    const query = initialQuery ?? await askQuestion(`\n  ${C.bold}${C.yellow}Search:${C.reset} `);
     const payload = query.trim();
     if (!payload) return;
     saveSearchToHistory(payload);
 
-    const globalResults = await withSpinner(`searching across ${providersList.length} providers...`, async () => {
-        const results = await Promise.all(providersList.map(async (prov) => {
-            try { const hits = await prov.search(payload, loadSettings().defaultAudio === 'dub'); return Array.isArray(hits) ? hits.map(item => ({ provider: prov, item })) : []; } catch(e) { return []; }
-        }));
-        return results.flat();
-    });
+    const settings = loadSettings();
+    let globalResults;
+    const cacheKey = `search:${payload}:${settings.defaultAudio}`;
+    cleanCache(searchCache, settings.cacheMaxSize, settings.cacheTTL);
+    if (searchCache.has(cacheKey) && (Date.now() - searchCache.get(cacheKey).timestamp) < settings.cacheTTL) {
+        globalResults = searchCache.get(cacheKey).data;
+        console.log(`  ${C.dim}Using cached results${C.reset}`);
+    } else {
+        globalResults = await withSpinner(`Searching across ${providersList.length} providers...`, async () => {
+            const results = await Promise.all(providersList.map(async (prov) => {
+                try { const hits = await prov.search(payload, settings.defaultAudio === 'dub'); return Array.isArray(hits) ? hits.map(item => ({ provider: prov, item })) : []; } catch(e) { return []; }
+            }));
+            return results.flat();
+        });
+        searchCache.set(cacheKey, { data: globalResults, timestamp: Date.now() });
+    }
 
     let flattenedMatches = globalResults.map(match => ({ ...match, score: 0 }));
-    if (!flattenedMatches.length) { renderBox("no results", [`nothing found for "${payload}"`], C.red); await wait(2000); return; }
+    if (!flattenedMatches.length) { renderBox("No Results", [`Nothing found for "${payload}"`], C.red); await wait(1500); return; }
     const normalizedQuery = payload.toLowerCase();
     flattenedMatches = flattenedMatches.map(match => {
         let cleanTitle = match.item.title.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
@@ -1072,7 +1265,7 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
         if (cleanTitle.toLowerCase() === normalizedQuery) score = 100;
         return { ...match, score };
     }).filter(match => match.score > 25);
-    if (!flattenedMatches.length) { renderBox("no matches", [`no close matches for "${payload}"`], C.red); await wait(2000); return; }
+    if (!flattenedMatches.length) { renderBox("No Close Matches", [`No close matches for "${payload}"`], C.red); await wait(1500); return; }
     const groupedMap = {};
     flattenedMatches.forEach(match => { const normalizedKey = match.item.title.toLowerCase(); if (!groupedMap[normalizedKey]) groupedMap[normalizedKey] = []; groupedMap[normalizedKey].push(match); });
     const groupEntries = Object.entries(groupedMap).map(([key, matches]) => ({ key, matches, maxScore: Math.max(...matches.map(m => m.score)) }));
@@ -1087,7 +1280,7 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
         const scoreBar = score >= 90 ? `${C.green}${score}%${C.reset}` : score >= 70 ? `${C.yellow}${score}%${C.reset}` : `${C.dim}${score}%${C.reset}`;
         return `${padRightVisible(item.title, 44)} ${C.cyan}${audioFlags}${C.reset}  ${C.dim}${sourceLabel}${C.reset}  ${scoreBar}`;
     });
-    const idx = await selectMenuOption(showSelectionStrings, `\n  ${C.bold}${C.cyan}◈ results for${C.reset} ${C.bold}"${payload}"${C.reset}`, { allowBack: true, statusBar: { providersCount: providersList.length, apiUrl: loadSettings().apiBaseUrl } });
+    const idx = await selectMenuOption(showSelectionStrings, `\n  ${C.bold}${C.cyan}◈ Results for${C.reset} ${C.bold}"${payload}"${C.reset}`, { allowBack: true, statusBar: { providersCount: providersList.length, apiUrl: loadSettings().apiBaseUrl } });
     if (idx >= 0 && idx < topGroups.length) {
         const selectedGroup = topGroups[idx];
         const selectedTitle = selectedGroup.matches[0].item.title;
@@ -1097,11 +1290,11 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
                 const audioFlags = audioLabel(m.item.hasSub, m.item.hasDub);
                 return `${C.bold}${m.provider.name}${C.reset}  ${C.dim}${audioFlags}${C.reset}`;
             });
-            const chosenProvIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ pick provider${C.reset}  ${C.dim}${selectedTitle}${C.reset}`, { allowBack: true });
+            const chosenProvIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ Pick source${C.reset}  ${C.dim}${selectedTitle}${C.reset}`, { allowBack: true });
             if (chosenProvIdx < 0) return;
             finalMatches = [selectedGroup.matches[chosenProvIdx]];
         }
-        const showMeta = await selectMenuOption(["view anime details", "go straight to episodes"], `\n  ${C.bold}${C.cyan}◈ ${selectedTitle}${C.reset}`, { allowBack: true });
+        const showMeta = await selectMenuOption(["View anime details", "Go to episodes"], `\n  ${C.bold}${C.cyan}◈ ${selectedTitle}${C.reset}`, { allowBack: true });
         if (showMeta === 0) { const metadata = await showMetadataPanel(selectedTitle); if (!metadata) return; }
         else if (showMeta < 0) return;
         await handleAnimeSelection(finalMatches);
@@ -1116,8 +1309,8 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     const hasSub = selectedMatches.some(m => m.item.hasSub);
     const hasDub = selectedMatches.some(m => m.item.hasDub);
     let audio = lockedAudio || settings.defaultAudio;
-    if (!lockedAudio && hasSub && hasDub && settings.defaultAction !== "download") {
-        const audioIdx = await selectMenuOption([`${C.cyan}SUB${C.reset}  subtitled`, `${C.magenta}DUB${C.reset}  dubbed`], `\n  ${C.bold}${C.cyan}◈ audio track${C.reset}  ${C.dim}default: ${settings.defaultAudio.toUpperCase()}${C.reset}`, { allowBack: true, statusBar });
+    if (!lockedAudio && hasSub && hasDub) {
+        const audioIdx = await selectMenuOption([`${C.cyan}SUB${C.reset}  Subtitled`, `${C.magenta}DUB${C.reset}  Dubbed`], `\n  ${C.bold}${C.cyan}◈ Audio track${C.reset}`, { allowBack: true, statusBar });
         if (audioIdx === 1) audio = "dub";
         else if (audioIdx < 0) return;
     } else if (!lockedAudio && !hasSub && hasDub) audio = "dub";
@@ -1125,46 +1318,43 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
 
     let isDownloadMode = false;
     let isBatchMode = false;
-    if (settings.defaultAction === "ask") {
-        const actionIdx = await selectMenuOption(["▶  stream via mpv", "↓  download single episode", "↓↓ batch download episodes"], `\n  ${C.bold}${C.cyan}◈ action${C.reset}`, { allowBack: true, statusBar });
-        if (actionIdx < 0) return;
-        if (actionIdx === 0) isDownloadMode = false;
-        else if (actionIdx === 1) isDownloadMode = true;
-        else if (actionIdx === 2) { isDownloadMode = true; isBatchMode = true; }
-    } else if (settings.defaultAction === "download") {
-        isDownloadMode = true;
-        const batchChoice = await selectMenuOption(["single episode", "batch download range"], `\n  ${C.bold}${C.cyan}◈ download mode${C.reset}`, { allowBack: true, statusBar });
-        if (batchChoice === 1) isBatchMode = true;
-        else if (batchChoice < 0) return;
+    const actionIdx = await selectMenuOption(["▶ Stream", "↓ Download single", "↓↓ Batch download"], `\n  ${C.bold}${C.cyan}◈ Action${C.reset}`, { allowBack: true, statusBar });
+    if (actionIdx < 0) return;
+    switch (actionIdx) {
+        case 0: isDownloadMode = false; break;
+        case 1: isDownloadMode = true; break;
+        case 2: isDownloadMode = true; isBatchMode = true; break;
     }
 
+    const cacheKey = `${coreTitle}|${selectedMatches.map(m => m.provider.name).join(',')}`;
+    cleanCache(episodeListCache, settings.cacheMaxSize, settings.cacheTTL);
     let providerEpLists;
-    try {
-        providerEpLists = await withSpinner(`loading episodes for "${coreTitle}"...`, async () => {
-            const lists = await Promise.all(selectedMatches.map(async (m) => {
-                try { const list = await m.provider.findEpisodes(m.item.url); return { provider: m.provider, list: Array.isArray(list) ? list : [] }; } catch(e) { return { provider: m.provider, list: [] }; }
-            }));
-            return lists;
-        });
-    } catch (err) {
-        console.log(`  ${C.yellow}⚠ retrying episode fetch...${C.reset}`);
-        providerEpLists = await Promise.all(selectedMatches.map(async (m) => {
-            try { const list = await m.provider.findEpisodes(m.item.url); return { provider: m.provider, list: Array.isArray(list) ? list : [] }; } catch(e) { return { provider: m.provider, list: [] }; }
-        }));
+    if (episodeListCache.has(cacheKey)) {
+        providerEpLists = episodeListCache.get(cacheKey).data;
+        console.log(`  ${C.dim}Using cached episode list${C.reset}`);
+    } else {
+        try {
+            providerEpLists = await withRetry(async () => {
+                const lists = await Promise.all(selectedMatches.map(async (m) => {
+                    try { const list = await m.provider.findEpisodes(m.item.url); return { provider: m.provider, list: Array.isArray(list) ? list : [] }; } catch(e) { return { provider: m.provider, list: [] }; }
+                }));
+                return lists;
+            }, 2);
+            episodeListCache.set(cacheKey, { data: providerEpLists, timestamp: Date.now() });
+        } catch (err) {
+            console.log(`  ${C.red}✗ Failed to fetch episodes${C.reset}`);
+            return;
+        }
     }
     const validLists = providerEpLists.filter(p => p.list && p.list.length > 0);
     if (!validLists.length) {
-        renderBox("no episodes found", [
-            "no episodes returned from any provider.",
-            "the api may have changed its response format.",
-            "try a different provider or update kittycli."
-        ], C.red);
-        await wait(3000);
+        renderBox("No Episodes", ["No episodes returned from any provider."], C.red);
+        await wait(2000);
         return;
     }
     let maxEpNum = 0;
-    for (const p of validLists) for (const ep of p.list) { let num = ep.number; if (typeof num === 'string') num = parseInt(num, 10); if (typeof num === 'number' && !isNaN(num) && num > maxEpNum) maxEpNum = num; }
-    if (maxEpNum === 0) { renderBox("error", ["invalid episode numbers."], C.red); await wait(2000); return; }
+    for (const p of validLists) for (const ep of p.list) { const num = parseEpisodeNumber(ep); if (num && num > maxEpNum) maxEpNum = num; }
+    if (maxEpNum === 0) { renderBox("Error", ["Invalid episode numbers."], C.red); await wait(1500); return; }
 
     const watchInfo = getWatchlistInfo(coreTitle);
     let effectiveTotalEpisodes = watchInfo?.totalEpisodes ?? null;
@@ -1175,7 +1365,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     }
 
     const titleMap = new Map();
-    for (const ep of validLists.flatMap(p => p.list)) { let num = ep.number; if (typeof num === 'string') num = parseInt(num, 10); if (typeof num === 'number' && !isNaN(num) && ep.title) titleMap.set(num, ep.title); }
+    for (const ep of validLists.flatMap(p => p.list)) { const num = parseEpisodeNumber(ep); if (num && ep.title) titleMap.set(num, ep.title); }
     let targetEpisode = startingEpisode || 1;
     if (!startingEpisode && !isBatchMode) {
         const picked = await selectEpisodeWithMarkers(maxEpNum, effectiveTotalEpisodes, coreTitle, statusBar, titleMap);
@@ -1184,21 +1374,17 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     }
 
     if (isDownloadMode && isBatchMode) {
-        const startEpRaw = await askQuestion(`\n  ${C.yellow}start episode (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `);
-        const endEpRaw = await askQuestion(`  ${C.yellow}end episode (–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `);
-        const start = parseInt(startEpRaw.trim(), 10);
-        let end = parseInt(endEpRaw.trim(), 10);
-        if (isNaN(start) || isNaN(end) || start < 1 || end > maxEpNum || start > end) { renderBox("invalid range", [`use numbers between 1 and ${maxEpNum}`], C.red); await wait(2000); return; }
-        const sampleEp = start;
+        const start = await askNumber(`\n  ${C.yellow}Start episode (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
+        const end = await askNumber(`  ${C.yellow}End episode (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
         const sampleProviderServersMap = new Map();
         for (const p of validLists) {
-            const epObj = p.list.find(e => { let num = e.number; if (typeof num === 'string') num = parseInt(num, 10); return num === sampleEp; });
+            const epObj = p.list.find(e => parseEpisodeNumber(e) === start);
             const dataIds = resolveEpisodeDataIds(epObj);
-            if (dataIds != null) {
+            if (dataIds) {
                 try { const servers = await p.provider.findAvailableServers(dataIds, audio); if (servers.length) sampleProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
             }
         }
-        if (sampleProviderServersMap.size === 0) { renderBox("error", [`no servers for episode ${sampleEp}`], C.red); await wait(2000); return; }
+        if (sampleProviderServersMap.size === 0) { renderBox("Error", [`No servers for episode ${start}`], C.red); await wait(1500); return; }
         const selection = await selectServerTwoStep(sampleProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
         const { provider: selectedProvider, serverId } = selection;
@@ -1211,38 +1397,17 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     if (isDownloadMode) {
         const downloadProviderServersMap = new Map();
         for (const p of validLists) {
-            const epObj = p.list.find(e => { let num = e.number; if (typeof num === 'string') num = parseInt(num, 10); return num === targetEpisode; });
+            const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
             const dataIds = resolveEpisodeDataIds(epObj);
-            if (dataIds != null) {
+            if (dataIds) {
                 try { const servers = await p.provider.findAvailableServers(dataIds, audio); if (servers.length) downloadProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
             }
         }
-        if (downloadProviderServersMap.size === 0) { renderBox("error", ["no download links found."], C.red); await wait(2000); return; }
+        if (downloadProviderServersMap.size === 0) { renderBox("Error", ["No download links found."], C.red); await wait(1500); return; }
         const selection = await selectServerTwoStep(downloadProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
-        const stream = await withSpinner(`fetching stream from ${selection.provider.name}...`, async () => await selection.provider.extractStreamFromLinkId(selection.serverId));
+        const stream = await withSpinner(`Fetching stream from ${selection.provider.name}...`, async () => await selection.provider.extractStreamFromLinkId(selection.serverId));
         if (stream && !stream.file && stream.url) stream.file = stream.url;
-        renderBox("stream ready", [stream.file], C.cyan);
-        if (stream.tracks && stream.tracks.length > 0) {
-            const subChoice = await selectMenuOption(["download subtitles", "skip"], `\n  ${C.bold}subtitles available${C.reset}`, { allowBack: false });
-            if (subChoice === 0) {
-                for (let i = 0; i < stream.tracks.length; i++) {
-                    const sub = stream.tracks[i];
-                    const subUrl = sub.file || sub.url;
-                    if (!subUrl) continue;
-                    let ext = '.srt';
-                    if (subUrl) {
-                        const match = subUrl.match(/\.(vtt|ass|srt)(\?|$)/i);
-                        if (match) ext = '.' + match[1].toLowerCase();
-                    }
-                    const subPath = path.join(process.cwd(), `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${sub.label || sub.lang || 'sub'}${ext}`);
-                    await downloadSubtitle(subUrl, subPath);
-                    console.log(`  ${C.green}✓ subtitle saved: ${subPath}${C.reset}`);
-                }
-            }
-        }
-        const copyChoice = await selectMenuOption(["copy url to clipboard", "proceed to download"], `\n  ${C.bold}ready${C.reset}`, { allowBack: false });
-        if (copyChoice === 0) { const copied = await copyToClipboard(stream.file); if (copied) console.log(`  ${C.green}✓ url copied to clipboard!${C.reset}`); else console.log(`  ${C.red}✗ failed to copy (install xclip on linux)${C.reset}`); }
         const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
         const filename = `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${ext}`;
         await resumeableDownload(stream, filename);
@@ -1253,19 +1418,19 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     while (targetEpisode <= maxEpNum && userWantsToContinue) {
         const providerServersMap = new Map();
         for (const p of validLists) {
-            const epObj = p.list.find(e => { let num = e.number; if (typeof num === 'string') num = parseInt(num, 10); return num === targetEpisode; });
+            const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
             const dataIds = resolveEpisodeDataIds(epObj);
-            if (dataIds != null) {
+            if (dataIds) {
                 try { const servers = await p.provider.findAvailableServers(dataIds, currentAudio); if (servers.length) providerServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
             }
         }
-        if (providerServersMap.size === 0) { renderBox("error", [`no servers for episode ${targetEpisode}`], C.red); break; }
+        if (providerServersMap.size === 0) { renderBox("Error", [`No servers for episode ${targetEpisode}`], C.red); break; }
         let selectedProvider = null, selectedServerId = null, selectedServerName = null;
         if (preferredProviderName && preferredServerName) {
             for (const [prov, servers] of providerServersMap.entries()) {
                 if (prov.name === preferredProviderName) { const matchedServer = servers.find(s => s.name === preferredServerName); if (matchedServer) { selectedProvider = prov; selectedServerId = matchedServer.id; selectedServerName = matchedServer.name; break; } }
             }
-            if (!selectedProvider) console.log(`  ${C.yellow}⚠ preferred server unavailable — reselecting${C.reset}`);
+            if (!selectedProvider) console.log(`  ${C.yellow}⚠ Preferred server unavailable — reselecting${C.reset}`);
         }
         if (!selectedProvider) {
             const selection = await selectServerTwoStep(providerServersMap, currentAudio === "sub" ? "SUB" : "DUB", statusBar);
@@ -1273,17 +1438,32 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             selectedProvider = selection.provider; selectedServerId = selection.serverId; selectedServerName = selection.serverName;
             preferredProviderName = selectedProvider.name; preferredServerName = selectedServerName;
         }
-        if (!selectedProvider || !selectedServerId) { renderBox("error", ["no server selected."], C.red); break; }
+        if (!selectedProvider || !selectedServerId) { renderBox("Error", ["No server selected."], C.red); break; }
         try {
-            const stream = await withSpinner(`fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));
-            if (!stream?.file && !stream?.url) throw new Error("no video file");
+            let stream = await withSpinner(`Fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));
+            if (!stream?.file && !stream?.url) throw new Error("No video file");
             if (stream && !stream.file && stream.url) stream.file = stream.url;
-            renderBox("stream ready", [stream.file], C.cyan);
+            
+            // Quality selection
+            let selectedQuality = null;
+            if (stream.qualities && stream.qualities.length > 1) {
+                const preferredQual = watchInfo?.quality || settings.preferredQuality;
+                selectedQuality = selectQuality(stream.qualities, preferredQual);
+                if (selectedQuality && selectedQuality !== stream.file) {
+                    // If the stream object has separate URLs per quality, choose one.
+                    if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                        stream.file = stream.qualityUrls[selectedQuality];
+                        console.log(`  ${C.dim}Selected quality: ${selectedQuality}${C.reset}`);
+                    } else {
+                        console.log(`  ${C.yellow}⚠ Quality selection not supported by this stream${C.reset}`);
+                    }
+                }
+            }
+            
             if (stream.tracks && stream.tracks.length > 0) {
-                const subChoice = await selectMenuOption(["download subtitles", "skip"], `\n  ${C.bold}subtitles available${C.reset}`, { allowBack: false });
+                const subChoice = await selectMenuOption(["Download subtitles", "Skip"], `\n  ${C.bold}Subtitles available${C.reset}`, { allowBack: false });
                 if (subChoice === 0) {
-                    for (let i = 0; i < stream.tracks.length; i++) {
-                        const sub = stream.tracks[i];
+                    for (const sub of stream.tracks) {
                         const subUrl = sub.file || sub.url;
                         if (!subUrl) continue;
                         let ext = '.srt';
@@ -1293,59 +1473,57 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                         }
                         const subPath = path.join(process.cwd(), `${coreTitle} - Episode ${targetEpisode} (${currentAudio.toUpperCase()}).${sub.label || sub.lang || 'sub'}${ext}`);
                         await downloadSubtitle(subUrl, subPath);
-                        console.log(`  ${C.green}✓ subtitle saved: ${subPath}${C.reset}`);
+                        console.log(`  ${C.green}✓ Subtitle saved: ${subPath}${C.reset}`);
                     }
                 }
             }
-            const copyChoice = await selectMenuOption(["copy url to clipboard", "▶ play now"], `\n  ${C.bold}ready${C.reset}`, { allowBack: false });
-            if (copyChoice === 0) { const copied = await copyToClipboard(stream.file); if (copied) console.log(`  ${C.green}✓ url copied!${C.reset}`); else console.log(`  ${C.red}✗ copy failed (install xclip on linux)${C.reset}`); await wait(1000); }
-            const episodeDisplay = effectiveTotalEpisodes ? `Episode ${targetEpisode}/${effectiveTotalEpisodes}` : `Episode ${targetEpisode}`;
+            const episodeDisplay = effectiveTotalEpisodes ? `Episode ${targetEpisode}/${effectiveTotalEpisodes}` : `Episode ${targetEpisode} (ongoing?)`;
             const epTitle = titleMap.get(targetEpisode);
             const playingTitle = epTitle ? `${episodeDisplay} — ${epTitle}` : episodeDisplay;
             const audioTag = currentAudio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
-            renderBox("now playing", [
+            renderBox("Now Playing", [
                 `${C.bold}${C.green}${coreTitle}${C.reset}`,
                 `${C.yellow}${playingTitle}${C.reset}`,
                 `${C.dim}${selectedProvider.name}  ·  ${selectedServerName}  ·${C.reset}  ${audioTag}  ${C.dim}·  ${settings.playbackSpeed}x${C.reset}`
             ], C.green);
-            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker);
+            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality);
             await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio);
             if (targetEpisode < maxEpNum) {
-                console.log(`\n  ${C.green}✓ episode ${targetEpisode} done${C.reset}`);
+                console.log(`\n  ${C.green}✓ Episode ${targetEpisode} done${C.reset}`);
                 const nextTitle = titleMap.get(targetEpisode + 1) || "";
                 const result = await bingeCountdownWithProgress(settings.bingeCountdownSeconds, targetEpisode + 1, currentAudio, nextTitle, () => { const newAudio = currentAudio === "sub" ? "dub" : "sub"; updateWatchlistAudio(coreTitle, newAudio); }, settings.autoPlayNext);
                 if (result.continue) {
                     if (result.newAudio) {
                         currentAudio = result.newAudio;
-                        console.log(`  ${C.yellow}◈ switched to ${currentAudio.toUpperCase()}${C.reset}`);
+                        console.log(`  ${C.yellow}◈ Switched to ${currentAudio.toUpperCase()}${C.reset}`);
                     }
                     targetEpisode++;
                 } else {
                     userWantsToContinue = false;
                 }
             } else {
-                console.log(`  ${C.green}✓ finished last episode!${C.reset}`);
+                console.log(`  ${C.green}✓ Finished last episode!${C.reset}`);
                 break;
             }
         } catch (err) {
-            renderBox("playback error", [err.message || err], C.red);
+            renderBox("Playback Error", [err.message || err], C.red);
             await wait(2000);
             break;
         }
     }
-    console.log(`  ${C.dim}session ended.${C.reset}`);
+    console.log(`  ${C.dim}Session ended.${C.reset}`);
 }
 
 async function triggerQuickResume(providersList) {
     const list = loadWatchlist();
-    if (list.length === 0) { renderBox("info", ["watchlist is empty. nothing to resume."], C.dim); await wait(1500); return; }
+    if (list.length === 0) { renderBox("Info", ["Watchlist is empty. Nothing to resume."], C.dim); await wait(1200); return; }
     const last = list[0];
     const mappedMatches = [];
     for (const match of last.matches) {
         const foundProvider = providersList.find(p => p.name === match.providerName);
         if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: last.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
     }
-    if (mappedMatches.length === 0) { renderBox("error", ["cannot restore provider data for last watch."], C.red); await wait(2000); return; }
+    if (mappedMatches.length === 0) { renderBox("Error", ["Cannot restore provider data for last watch."], C.red); await wait(1500); return; }
     await handleAnimeSelection(mappedMatches, last.lastEpisode + 1, last.audio);
 }
 
@@ -1354,19 +1532,26 @@ async function triggerRecentSearchesWorkflow(providersList) {
     if (history.length === 0) {
         clearScreen();
         renderHeader("RECENT SEARCHES", "");
-        renderBox("info", ["no searches saved yet."], C.dim);
+        renderBox("Info", ["No searches saved yet."], C.dim);
         await pauseForKey();
         return;
     }
-    const options = [...history.map((query, idx) => `${padRightVisible(query, 48)} ${C.dim}#${idx + 1}${C.reset}`), `${C.dim}clear all${C.reset}`, `${C.dim}go back${C.reset}`];
-    const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ recent searches${C.reset}`, { allowBack: true });
+    const options = [...history.map((query, idx) => `${padRightVisible(query, 48)} ${C.dim}#${idx + 1}${C.reset}`), `${C.dim}Clear all${C.reset}`, `${C.dim}Go back${C.reset}`];
+    const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ Recent searches${C.reset}`, { allowBack: true });
     if (selectedIdx < 0 || selectedIdx === history.length + 1) return;
-    if (selectedIdx === history.length) { clearSearchHistory(); renderBox("done", ["searches cleared."], C.green); await wait(1200); return; }
+    if (selectedIdx === history.length) {
+        const confirm = await selectMenuOption(["Yes, clear all", "No, go back"], `\n  ${C.bold}${C.red}Clear all recent searches?${C.reset}`, { allowBack: true });
+        if (confirm === 0) { clearSearchHistory(); renderBox("Done", ["Searches cleared."], C.green); }
+        await wait(1000);
+        return;
+    }
     const selectedQuery = history[selectedIdx];
-    const actionOptions = [`search  "${selectedQuery}"`, `delete this entry`, `go back`];
+    const actionOptions = [`Search "${selectedQuery}"`, `Delete this entry`, `Go back`];
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedQuery}${C.reset}`, { allowBack: true });
-    if (actionIdx === 0) await triggerSearchWorkflow(selectedQuery, providersList);
-    else if (actionIdx === 1) { deleteSearchHistoryItem(selectedIdx); renderBox("done", ["search deleted."], C.green); await wait(1000); }
+    switch (actionIdx) {
+        case 0: await triggerSearchWorkflow(selectedQuery, providersList); break;
+        case 1: deleteSearchHistoryItem(selectedIdx); renderBox("Done", ["Search deleted."], C.green); await wait(800); break;
+    }
 }
 
 async function triggerWatchlistWorkflow(providersList) {
@@ -1375,131 +1560,189 @@ async function triggerWatchlistWorkflow(providersList) {
     if (list.length === 0) {
         clearScreen();
         renderHeader("WATCHLIST", "");
-        renderBox("info", ["watchlist is empty.", "start watching to build your history."], C.dim);
-        await wait(2500);
+        renderBox("Info", ["Watchlist is empty.", "Start watching to build your history."], C.dim);
+        await wait(2000);
         return;
     }
-    const options = list.map((item, idx) => {
-        const epDisplay = item.totalEpisodes ? `${C.bold}ep ${item.lastEpisode}${C.reset}${C.dim}/${item.totalEpisodes}${C.reset}` : `${C.bold}ep ${item.lastEpisode}${C.reset}`;
+    const options = list.map((item) => {
+        const epDisplay = item.totalEpisodes ? `${C.bold}ep ${item.lastEpisode}${C.reset}${C.dim}/${item.totalEpisodes}${C.reset}` : `${C.bold}ep ${item.lastEpisode}${C.reset}${C.dim}/?${C.reset}`;
         const audioTag = item.audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
         return `${padRightVisible(item.title, 40)}  ${epDisplay}  ${audioTag}  ${C.dim}${item.timestamp}${C.reset}`;
     });
-    options.push(`${C.dim}clear watchlist${C.reset}`, `${C.dim}go back${C.reset}`);
-    const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ watchlist${C.reset}`, { allowBack: true });
+    options.push(`${C.dim}Clear watchlist${C.reset}`, `${C.dim}Go back${C.reset}`);
+    const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ Watchlist${C.reset}`, { allowBack: true });
     if (selectedIdx < 0) return;
     if (selectedIdx === list.length) {
-        const confirm = await selectMenuOption(["yes, clear all", "no, go back"], `\n  ${C.bold}${C.red}clear entire watchlist?${C.reset}`, { allowBack: true });
-        if (confirm === 0) { clearWatchlist(); renderBox("done", ["watchlist cleared."], C.green); }
-        await wait(1500);
+        const confirm = await selectMenuOption(["Yes, clear all", "No, go back"], `\n  ${C.bold}${C.red}Clear entire watchlist?${C.reset}`, { allowBack: true });
+        if (confirm === 0) { clearWatchlist(); renderBox("Done", ["Watchlist cleared."], C.green); }
+        await wait(1200);
         return;
     }
     if (selectedIdx === list.length + 1) return;
     const targetItem = list[selectedIdx];
     const nextEpNum = targetItem.lastEpisode + 1;
-    const totalHint = targetItem.totalEpisodes ? `/${targetItem.totalEpisodes}` : '';
+    const totalHint = targetItem.totalEpisodes ? `/${targetItem.totalEpisodes}` : '/?';
     const actionOptions = [
-        `▶  resume  ep ${nextEpNum}${totalHint}`,
-        `↺  replay  ep ${targetItem.lastEpisode}${totalHint}`,
-        `⏮  start from episode 1`,
-        `✎  edit episode progress`,
-        `◈  toggle audio  (${targetItem.audio.toUpperCase()})`,
-        `✓  mark as completed`,
-        `○  mark as unwatched`,
-        `⟳  refresh total episodes`,
-        `✕  remove from watchlist`,
-        `←  go back`
+        `▶ Resume ep ${nextEpNum}${totalHint}`,
+        `↺ Replay ep ${targetItem.lastEpisode}${totalHint}`,
+        `⏮ Start from ep 1`,
+        `✎ Edit progress`,
+        `◈ Toggle audio (${targetItem.audio.toUpperCase()})`,
+        `✓ Mark completed`,
+        `○ Mark unwatched`,
+        `⟳ Refresh total episodes`,
+        `✕ Remove from watchlist`,
+        `← Go back`
     ];
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${targetItem.title}${C.reset}`, { allowBack: true });
     if (actionIdx < 0 || actionIdx === actionOptions.length - 1) return;
-    if (actionIdx === 7) {
-        const totalData = await fetchTotalEpisodesFromWorker(targetItem.title, targetItem.anilistId, loadSettings().apiBaseUrl);
-        if (totalData && totalData.totalEpisodes !== null) {
-            const list = loadWatchlist();
-            const idx = list.findIndex(item => item.title.toLowerCase() === targetItem.title.toLowerCase());
-            if (idx !== -1) {
-                list[idx].totalEpisodes = totalData.totalEpisodes;
-                if (totalData.anilistId) list[idx].anilistId = totalData.anilistId;
-                saveWatchlist(list);
-                renderBox("updated", [`total episodes set to ${totalData.totalEpisodes}`], C.green);
-            } else { renderBox("error", ["entry not found."], C.red); }
-        } else { renderBox("error", ["could not fetch total episodes."], C.red); }
-        await wait(1500);
-        return;
+    switch (actionIdx) {
+        case 7:
+            const totalData = await fetchTotalEpisodesFromWorker(targetItem.title, targetItem.anilistId, loadSettings().apiBaseUrl);
+            if (totalData && totalData.totalEpisodes !== null) {
+                const idx = list.findIndex(item => item.title.toLowerCase() === targetItem.title.toLowerCase());
+                if (idx !== -1) {
+                    list[idx].totalEpisodes = totalData.totalEpisodes;
+                    if (totalData.anilistId) list[idx].anilistId = totalData.anilistId;
+                    saveWatchlist(list);
+                    renderBox("Updated", [`Total episodes set to ${totalData.totalEpisodes}`], C.green);
+                } else { renderBox("Error", ["Entry not found."], C.red); }
+            } else { renderBox("Error", ["Could not fetch total episodes."], C.red); }
+            await wait(1200);
+            break;
+        case 8:
+            deleteWatchlistItem(selectedIdx);
+            renderBox("Done", ["Removed from watchlist."], C.green);
+            await wait(1000);
+            break;
+        case 4:
+            const newAudio = targetItem.audio === "sub" ? "dub" : "sub";
+            updateWatchlistAudio(targetItem.title, newAudio);
+            renderBox("Updated", [`Audio switched to ${newAudio.toUpperCase()}`], C.green);
+            await wait(1000);
+            break;
+        case 5:
+            if (targetItem.totalEpisodes && targetItem.totalEpisodes > 0) {
+                updateWatchlistEpisode(targetItem.title, targetItem.totalEpisodes);
+                renderBox("Done", [`${targetItem.title} marked as completed`], C.green);
+            } else {
+                const manualEp = await askNumber(`\n  ${C.yellow}Final episode number${C.reset}  ${C.bold}›${C.reset} `, 1, 9999);
+                updateWatchlistEpisode(targetItem.title, manualEp);
+                renderBox("Done", [`Last episode set to ${manualEp}`], C.green);
+            }
+            await wait(1200);
+            break;
+        case 6:
+            updateWatchlistEpisode(targetItem.title, 0);
+            renderBox("Updated", [`${targetItem.title} marked as unwatched`], C.green);
+            await wait(1000);
+            break;
+        case 3:
+            const newEp = await askNumber(`\n  ${C.yellow}New last watched episode (current: ${targetItem.lastEpisode})${C.reset}  ${C.bold}›${C.reset} `, 0, 9999);
+            updateWatchlistEpisode(targetItem.title, newEp);
+            renderBox("Updated", [`Episode progress → ${newEp}`], C.green);
+            await wait(1000);
+            break;
+        default:
+            const mappedMatches = [];
+            for (const match of targetItem.matches) {
+                const foundProvider = providersList.find(p => p.name === match.providerName);
+                if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: targetItem.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
+            }
+            if (mappedMatches.length === 0) { renderBox("Error", ["Failed to restore provider data."], C.red); await wait(1500); return; }
+            let startEpisode = 1;
+            if (actionIdx === 0) startEpisode = targetItem.lastEpisode + 1;
+            else if (actionIdx === 1) startEpisode = targetItem.lastEpisode;
+            else if (actionIdx === 2) startEpisode = 1;
+            await handleAnimeSelection(mappedMatches, startEpisode, targetItem.audio);
+            break;
     }
-    if (actionIdx === 8) { deleteWatchlistItem(selectedIdx); renderBox("done", ["removed from watchlist."], C.green); await wait(1200); return; }
-    if (actionIdx === 4) { const newAudio = targetItem.audio === "sub" ? "dub" : "sub"; updateWatchlistAudio(targetItem.title, newAudio); renderBox("updated", [`audio switched to ${newAudio.toUpperCase()}`], C.green); await wait(1200); return; }
-    if (actionIdx === 5) {
-        if (targetItem.totalEpisodes && targetItem.totalEpisodes > 0) {
-            updateWatchlistEpisode(targetItem.title, targetItem.totalEpisodes);
-            renderBox("done", [`${targetItem.title} marked as completed`], C.green);
-        } else {
-            const manualEp = await askQuestion(`\n  ${C.yellow}final episode number${C.reset}  ${C.bold}›${C.reset} `);
-            const epNum = parseInt(manualEp.trim(), 10);
-            if (!isNaN(epNum) && epNum > 0) { updateWatchlistEpisode(targetItem.title, epNum); renderBox("done", [`last episode set to ${epNum}`], C.green); }
-            else { renderBox("unchanged", ["no change made."], C.yellow); }
-        }
-        await wait(1500);
-        return;
-    }
-    if (actionIdx === 6) { updateWatchlistEpisode(targetItem.title, 0); renderBox("updated", [`${targetItem.title} marked as unwatched`], C.green); await wait(1500); return; }
-    if (actionIdx === 3) {
-        const newEpRaw = await askQuestion(`\n  ${C.yellow}new last watched episode (current: ${targetItem.lastEpisode})${C.reset}  ${C.bold}›${C.reset} `);
-        const newEp = parseInt(newEpRaw.trim(), 10);
-        if (!isNaN(newEp) && newEp >= 0) { updateWatchlistEpisode(targetItem.title, newEp); renderBox("updated", [`episode progress → ${newEp}`], C.green); }
-        else { renderBox("unchanged", ["no change made."], C.yellow); }
-        await wait(1500);
-        return;
-    }
-    const mappedMatches = [];
-    for (const match of targetItem.matches) {
-        const foundProvider = providersList.find(p => p.name === match.providerName);
-        if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: targetItem.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
-    }
-    if (mappedMatches.length === 0) { renderBox("error", ["failed to restore provider data."], C.red); await wait(2000); return; }
-    let startEpisode = 1;
-    if (actionIdx === 0) startEpisode = targetItem.lastEpisode + 1;
-    else if (actionIdx === 1) startEpisode = targetItem.lastEpisode;
-    else if (actionIdx === 2) startEpisode = 1;
-    await handleAnimeSelection(mappedMatches, startEpisode, targetItem.audio);
 }
 
 async function triggerSettingsWorkflow(providersCount) {
     while (true) {
         const settings = loadSettings();
         const options = [
-            `default action    ${C.dim}${settings.defaultAction === "ask" ? "ask every time" : settings.defaultAction === "stream" ? "stream via mpv" : "download to disk"}${C.reset}`,
-            `binge countdown   ${C.dim}${settings.bingeCountdownSeconds}s${C.reset}`,
-            `default audio     ${C.dim}${settings.defaultAudio === "sub" ? "subtitled (sub)" : "dubbed (dub)"}${C.reset}`,
-            `playback speed    ${C.dim}${settings.playbackSpeed}x${C.reset}`,
-            `mpv arguments     ${C.dim}${settings.mpvArgs ? `"${settings.mpvArgs}"` : "none"}${C.reset}`,
-            `menu page size    ${C.dim}${settings.pageSize} rows${C.reset}`,
-            `api base url      ${C.dim}${settings.apiBaseUrl}${C.reset}`,
-            `auto-update       ${settings.enableUpdateCheck ? `${C.green}on${C.reset}` : `${C.dim}off${C.reset}`}`,
-            `auto-play next    ${settings.autoPlayNext ? `${C.green}on${C.reset}` : `${C.dim}off${C.reset}`}`,
-            `discord presence  ${settings.discordEnabled ? `${C.green}on${C.reset}` : `${C.dim}off${C.reset}`}`,
-            `discord client id ${C.dim}${settings.discordClientId}${C.reset}`,
-            `${C.dim}clear recent searches${C.reset}`,
-            `${C.dim}reset all settings${C.reset}`,
-            `${C.dim}go back${C.reset}`
+            `Binge delay     ${C.dim}${settings.bingeCountdownSeconds}s${C.reset}`,
+            `Default audio   ${C.dim}${settings.defaultAudio === "sub" ? "Subtitled" : "Dubbed"}${C.reset}`,
+            `Playback speed  ${C.dim}${settings.playbackSpeed}x${C.reset}`,
+            `Auto-play next  ${settings.autoPlayNext ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Resume playback ${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Discord RPC     ${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Download dir    ${C.dim}${settings.downloadDir}${C.reset}`,
+            `API base URL    ${C.dim}${settings.apiBaseUrl}${C.reset}`,
+            `Clear cache`,
+            `Reset all settings`,
+            `Go back`
         ];
-        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ settings${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
+        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ Settings${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
         if (idx < 0 || idx === options.length - 1) return;
-        if (idx === 0) { const actionIdx = await selectMenuOption(["ask every time", "stream via mpv", "download to disk"], `\n  ${C.bold}${C.cyan}default action${C.reset}`, { allowBack: true }); if (actionIdx >= 0) { settings.defaultAction = actionIdx === 1 ? "stream" : actionIdx === 2 ? "download" : "ask"; saveSettings(settings); } }
-        else if (idx === 1) { const values = [3,5,10,15,20,30,45,60,90,120]; const valueIdx = await selectMenuOption(values.map(v => `${v}s`), `\n  ${C.bold}${C.cyan}binge countdown${C.reset}`, { allowBack: true }); if (valueIdx >= 0) { settings.bingeCountdownSeconds = values[valueIdx]; saveSettings(settings); } }
-        else if (idx === 2) { const audioOpts = ["sub — subtitled", "dub — dubbed"]; const audioIdx = await selectMenuOption(audioOpts, `\n  ${C.bold}${C.cyan}default audio${C.reset}`, { allowBack: true }); if (audioIdx >= 0) { settings.defaultAudio = audioIdx === 0 ? "sub" : "dub"; saveSettings(settings); } }
-        else if (idx === 3) { const speeds = [0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0]; const speedIdx = await selectMenuOption(speeds.map(s => `${s}x`), `\n  ${C.bold}${C.cyan}playback speed${C.reset}`, { allowBack: true }); if (speedIdx >= 0) { settings.playbackSpeed = speeds[speedIdx]; saveSettings(settings); } }
-        else if (idx === 4) { const newArgs = await askQuestion(`\n  ${C.yellow}mpv arguments${C.reset}  ${C.bold}›${C.reset} `); settings.mpvArgs = newArgs.trim(); saveSettings(settings); renderBox("saved", ["mpv arguments updated."], C.green); await wait(1500); }
-        else if (idx === 5) { const values = [8,10,12,15,20]; const valueIdx = await selectMenuOption(values.map(v => `${v} rows`), `\n  ${C.bold}${C.cyan}page size${C.reset}`, { allowBack: true }); if (valueIdx >= 0) { settings.pageSize = values[valueIdx]; saveSettings(settings); } }
-        else if (idx === 6) { const newUrl = await askQuestion(`\n  ${C.yellow}api base url${C.reset}  ${C.bold}›${C.reset} `); if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("saved", [`api url → ${settings.apiBaseUrl}`], C.green); await wait(1500); } }
-        else if (idx === 7) { settings.enableUpdateCheck = !settings.enableUpdateCheck; saveSettings(settings); renderBox("updated", [`auto-update ${settings.enableUpdateCheck ? "enabled" : "disabled"}`], C.green); await wait(1000); }
-        else if (idx === 8) { settings.autoPlayNext = !settings.autoPlayNext; saveSettings(settings); renderBox("updated", [`auto-play next: ${settings.autoPlayNext ? "on" : "off"}`], C.green); await wait(1000); }
-        else if (idx === 9) { settings.discordEnabled = !settings.discordEnabled; saveSettings(settings); renderBox("updated", [`Discord presence ${settings.discordEnabled ? "enabled" : "disabled"}`], C.green); await wait(1000); }
-        else if (idx === 10) {
-            const newId = await askQuestion(`\n  ${C.yellow}Discord client ID${C.reset}  ${C.bold}›${C.reset} `);
-            if (newId.trim()) { settings.discordClientId = newId.trim(); saveSettings(settings); renderBox("saved", ["client ID updated."], C.green); await wait(1500); }
+        switch (idx) {
+            case 0:
+                const values = [3,5,8,10,15,20,30];
+                const valueIdx = await selectMenuOption(values.map(v => `${v}s`), `\n  ${C.bold}${C.cyan}Binge delay${C.reset}`, { allowBack: true });
+                if (valueIdx >= 0) { settings.bingeCountdownSeconds = values[valueIdx]; saveSettings(settings); }
+                break;
+            case 1:
+                const audioOpts = ["Subtitled (sub)", "Dubbed (dub)"];
+                const audioIdx = await selectMenuOption(audioOpts, `\n  ${C.bold}${C.cyan}Default audio${C.reset}`, { allowBack: true });
+                if (audioIdx >= 0) { settings.defaultAudio = audioIdx === 0 ? "sub" : "dub"; saveSettings(settings); }
+                break;
+            case 2:
+                const speeds = [0.75,1.0,1.25,1.5,1.75,2.0];
+                const speedIdx = await selectMenuOption(speeds.map(s => `${s}x`), `\n  ${C.bold}${C.cyan}Playback speed${C.reset}`, { allowBack: true });
+                if (speedIdx >= 0) { settings.playbackSpeed = speeds[speedIdx]; saveSettings(settings); }
+                break;
+            case 3:
+                settings.autoPlayNext = !settings.autoPlayNext;
+                saveSettings(settings);
+                renderBox("Updated", [`Auto-play next: ${settings.autoPlayNext ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 4:
+                settings.resumePlayback = !settings.resumePlayback;
+                saveSettings(settings);
+                renderBox("Updated", [`Resume playback: ${settings.resumePlayback ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 5:
+                settings.discordEnabled = !settings.discordEnabled;
+                saveSettings(settings);
+                renderBox("Updated", [`Discord RPC: ${settings.discordEnabled ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 6:
+                const newDir = await askQuestion(`\n  ${C.yellow}Download directory (full path)${C.reset}  ${C.bold}›${C.reset} `);
+                if (newDir.trim()) {
+                    const resolved = path.resolve(newDir.trim());
+                    if (fs.existsSync(resolved) || !resolved) {
+                        settings.downloadDir = resolved;
+                        saveSettings(settings);
+                        renderBox("Saved", [`Download directory → ${settings.downloadDir}`], C.green);
+                    } else {
+                        renderBox("Error", ["Directory does not exist."], C.red);
+                    }
+                    await wait(1200);
+                }
+                break;
+            case 7:
+                const newUrl = await askQuestion(`\n  ${C.yellow}API base URL${C.reset}  ${C.bold}›${C.reset} `);
+                if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("Saved", [`API URL → ${settings.apiBaseUrl}`], C.green); await wait(1200); }
+                break;
+            case 8:
+                searchCache.clear();
+                episodeListCache.clear();
+                renderBox("Done", ["Cache cleared."], C.green);
+                await wait(1000);
+                break;
+            case 9:
+                saveSettings(defaultSettings);
+                searchCache.clear();
+                episodeListCache.clear();
+                renderBox("Done", ["Settings reset to defaults."], C.green);
+                await wait(1200);
+                break;
         }
-        else if (idx === 11) { clearSearchHistory(); renderBox("done", ["searches cleared."], C.green); await wait(1000); }
-        else if (idx === 12) { saveSettings(defaultSettings); renderBox("done", ["settings reset to defaults."], C.green); await wait(1000); }
     }
 }
 
@@ -1513,9 +1756,9 @@ async function triggerProviderOverviewWorkflow(providersList) {
         console.log(`  ${C.dim}${num}${C.reset}  ${C.bold}${C.green}${provider.name}${C.reset}`);
     });
     console.log();
-    renderBox("info", [
-        "all providers are searched in parallel.",
-        `api: ${loadSettings().apiBaseUrl}`
+    renderBox("Info", [
+        "All providers are searched in parallel.",
+        `API: ${loadSettings().apiBaseUrl}`
     ], C.dim);
     await pauseForKey();
 }
@@ -1524,43 +1767,42 @@ async function showAbout(providersCount, apiUrl) {
     clearScreen();
     renderHeader("KITTYCLI", `v${APP_VERSION}`);
     const content = [
-        `${C.bold}${C.green}anime aggregator terminal client${C.reset}`,
+        `${C.bold}${C.green}Anime aggregator terminal client${C.reset}`,
         `${C.dim}────────────────────────────────────────${C.reset}`,
-        `${C.dim}version${C.reset}    ${C.bold}${APP_VERSION}${C.reset}`,
-        `${C.dim}node${C.reset}       ${process.version}`,
-        `${C.dim}providers${C.reset}  ${C.cyan}${providersCount}${C.reset}`,
-        `${C.dim}api${C.reset}        ${C.yellow}${apiUrl}${C.reset}`,
-        `${C.dim}data${C.reset}       ${DATA_DIR}`,
+        `${C.dim}Version${C.reset}    ${C.bold}${APP_VERSION}${C.reset}`,
+        `${C.dim}Node${C.reset}       ${process.version}`,
+        `${C.dim}Providers${C.reset}  ${C.cyan}${providersCount}${C.reset}`,
+        `${C.dim}API${C.reset}        ${C.yellow}${apiUrl}${C.reset}`,
+        `${C.dim}Data${C.reset}       ${DATA_DIR}`,
         ``,
-        `${C.bold}${C.cyan}features${C.reset}`,
-        `  ${C.green}◈${C.reset} multi-provider search & streaming`,
-        `  ${C.green}◈${C.reset} watchlist with progress tracking`,
-        `  ${C.green}◈${C.reset} resumable downloads (http + hls)`,
-        `  ${C.green}◈${C.reset} batch episode downloads`,
-        `  ${C.green}◈${C.reset} binge mode with countdown`,
-        `  ${C.green}◈${C.reset} fuzzy search ranking`,
-        `  ${C.green}◈${C.reset} subtitle download`,
-        `  ${C.green}◈${C.reset} anilist metadata panel`,
-        `  ${C.green}◈${C.reset} playback speed & mpv args`,
-        `  ${C.green}◈${C.reset} clipboard url copy`,
-        `  ${C.green}◈${C.reset} Discord Rich Presence with GitHub button`,
+        `${C.bold}${C.cyan}Features${C.reset}`,
+        `  • Multi-provider search & streaming`,
+        `  • Watchlist with progress tracking`,
+        `  • Resumable downloads (HTTP + HLS)`,
+        `  • Parallel batch downloads`,
+        `  • Resume playback position (IPC)`,
+        `  • Video quality selection (if available)`,
+        `  • Binge mode with countdown`,
+        `  • AniList metadata panel`,
+        `  • Discord Rich Presence`,
+        `  • System notifications`,
         ``,
-        `${C.dim}gpl-3.0 · based on anikoto api${C.reset}`
+        `${C.dim}GPL-3.0 · Based on Anikoto API${C.reset}`
     ];
-    renderBox("about", content, C.cyan);
+    renderBox("About", content, C.cyan);
     await pauseForKey();
 }
 
 if (process.argv.includes('--version') || process.argv.includes('-v')) { console.log(`kittycli v${APP_VERSION}`); process.exit(0); }
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
     console.log(`kittycli v${APP_VERSION} — anime aggregator terminal client`);
-    console.log(''); console.log('usage: kittycli [options]'); console.log('');
-    console.log('options:');
-    console.log('  -v, --version   show version');
-    console.log('  -h, --help      show this help');
-    console.log('  -s, --search    search directly');
+    console.log(''); console.log('Usage: kittycli [options]'); console.log('');
+    console.log('Options:');
+    console.log('  -v, --version   Show version');
+    console.log('  -h, --help      Show this help');
+    console.log('  --debug         Enable verbose logging');
     console.log('');
-    console.log(`data: ~/.kittycli/`); process.exit(0);
+    console.log(`Data directory: ${DATA_DIR}`); process.exit(0);
 }
 
 async function terminalEngine() {
@@ -1568,23 +1810,28 @@ async function terminalEngine() {
     if (settings.enableUpdateCheck) {
         const latest = await checkForUpdates();
         if (latest) {
-            console.log(`\n  ${C.yellow}◈ update available: ${latest}  (current: ${APP_VERSION})${C.reset}`);
+            console.log(`\n  ${C.yellow}◈ Update available: ${latest}  (current: ${APP_VERSION})${C.reset}`);
             console.log(`  ${C.dim}npm update -g @fampep/kittycli${C.reset}\n`);
             await wait(2000);
         }
     }
     const isApiReachable = await checkApiServer(settings.apiBaseUrl);
     if (!isApiReachable) {
-        console.log(`  ${C.yellow}⚠ api server unreachable — open settings to change url${C.reset}`);
-        await pauseForKey("press any key to open settings...");
+        console.log(`  ${C.yellow}⚠ API server unreachable — opening settings...${C.reset}`);
+        await pauseForKey("Press any key to open settings...");
         await triggerSettingsWorkflow(0);
         settings = loadSettings();
         const reachable = await checkApiServer(settings.apiBaseUrl);
         if (!reachable) {
-            renderBox("fatal", ["still cannot connect. exiting."], C.red);
+            renderBox("Fatal", ["Still cannot connect. Exiting."], C.red);
             rl.close();
             return;
         }
+    }
+
+    if (settings.discordEnabled && !discordRpc) {
+        initDiscordRpc(settings.discordClientId);
+        await wait(500);
     }
 
     const providersList = await createProviders(settings.apiBaseUrl);
@@ -1596,38 +1843,52 @@ async function terminalEngine() {
         renderHeader("KITTYCLI", `v${APP_VERSION}  ·  ${providersCount} providers`);
         const W = 72;
         console.log(`\n  ${C.bold}${C.green}╭${"─".repeat(W)}╮${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}watchlist${C.reset}  ${C.bold}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 16 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}searches ${C.reset}  ${C.bold}${historyCount}${C.reset} saved${" ".repeat(W - 16 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}api      ${C.reset}  ${C.yellow}${settings.apiBaseUrl}${C.reset}${" ".repeat(Math.max(0, W - 11 - settings.apiBaseUrl.length))}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}discord   ${C.reset}  ${settings.discordEnabled ? `${C.green}● on${C.reset}` : `${C.dim}○ off${C.reset}`}${" ".repeat(W - 16)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Watchlist${C.reset}  ${C.bold}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 16 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Searches ${C.reset}  ${C.bold}${historyCount}${C.reset} saved${" ".repeat(W - 16 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}API      ${C.reset}  ${C.yellow}${settings.apiBaseUrl}${C.reset}${" ".repeat(Math.max(0, W - 11 - settings.apiBaseUrl.length))}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Discord   ${C.reset}  ${settings.discordEnabled ? `${C.green}● ON${C.reset}` : `${C.dim}○ OFF${C.reset}`}${" ".repeat(W - 16)}${C.bold}${C.green}│${C.reset}`);
         console.log(`  ${C.bold}${C.green}╰${"─".repeat(W)}╯${C.reset}\n`);
         const mainOptions = [
-            `${C.bold}search anime${C.reset}            ${C.dim}find & stream anything${C.reset}`,
-            `${C.bold}recent searches${C.reset}         ${C.dim}${historyCount} saved${C.reset}`,
-            `${C.bold}watchlist${C.reset}               ${C.dim}${watchlistCount} item${watchlistCount !== 1 ? 's' : ''}${C.reset}`,
-            `${C.bold}quick resume${C.reset}            ${C.dim}continue last watched${C.reset}`,
-            `${C.bold}provider overview${C.reset}       ${C.dim}${providersCount} sources${C.reset}`,
-            `${C.bold}settings${C.reset}`,
-            `${C.bold}clear screen${C.reset}`,
-            `${C.bold}help${C.reset}`,
-            `${C.bold}about${C.reset}`,
-            `${C.dim}exit${C.reset}`
+            `${C.bold}🔍 Search anime${C.reset}`,
+            `${C.bold}📜 Recent searches${C.reset}  ${C.dim}${historyCount} saved${C.reset}`,
+            `${C.bold}📺 Watchlist${C.reset}        ${C.dim}${watchlistCount} item${watchlistCount !== 1 ? 's' : ''}${C.reset}`,
+            `${C.bold}▶ Quick resume${C.reset}`,
+            `${C.bold}🌐 Providers${C.reset}        ${C.dim}${providersCount} sources${C.reset}`,
+            `${C.bold}⚙ Settings${C.reset}`,
+            `${C.bold}❓ Help / About${C.reset}`,
+            `${C.dim}Exit${C.reset}`
         ];
         const choiceIdx = await selectMenuOption(mainOptions, ``, { statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
-        if (choiceIdx === 0) await triggerSearchWorkflow(undefined, providersList);
-        else if (choiceIdx === 1) await triggerRecentSearchesWorkflow(providersList);
-        else if (choiceIdx === 2) await triggerWatchlistWorkflow(providersList);
-        else if (choiceIdx === 3) await triggerQuickResume(providersList);
-        else if (choiceIdx === 4) await triggerProviderOverviewWorkflow(providersList);
-        else if (choiceIdx === 5) await triggerSettingsWorkflow(providersCount);
-        else if (choiceIdx === 6) console.clear();
-        else if (choiceIdx === 7) await showHelpGuide();
-        else if (choiceIdx === 8) await showAbout(providersCount, settings.apiBaseUrl);
-        else if (choiceIdx === 9) { rl.close(); clearScreen(); console.log(`\n  ${C.green}✓ goodbye!${C.reset}\n`); break; }
+        switch (choiceIdx) {
+            case 0: await triggerSearchWorkflow(undefined, providersList); break;
+            case 1: await triggerRecentSearchesWorkflow(providersList); break;
+            case 2: await triggerWatchlistWorkflow(providersList); break;
+            case 3: await triggerQuickResume(providersList); break;
+            case 4: await triggerProviderOverviewWorkflow(providersList); break;
+            case 5: await triggerSettingsWorkflow(providersCount); break;
+            case 6: await showHelp(); break;
+            case 7: rl.close(); clearScreen(); console.log(`\n  ${C.green}✓ Goodbye!${C.reset}\n`); return;
+        }
     }
 }
 
-process.on('SIGINT', () => { console.log(`\n  ${C.green}✓ goodbye!${C.reset}\n`); try { rl.close(); } catch(e) {} process.exit(0); });
-process.on('uncaughtException', (err) => { console.error(`\n  ${C.red}✗ unexpected error:${C.reset}`, err.message); try { rl.close(); } catch(e) {} process.exit(1); });
+process.on('SIGINT', () => {
+    if (discordRpc) discordRpc.destroy().catch(() => {});
+    console.log(`\n  ${C.green}✓ Goodbye!${C.reset}\n`);
+    try { rl.close(); } catch(e) {}
+    process.exit(0);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error(`\n  ${C.red}✗ Unhandled rejection:${C.reset}`, reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error(`\n  ${C.red}✗ Unexpected error:${C.reset}`, err.message);
+    try { rl.close(); } catch(e) {}
+    process.exit(1);
+});
 
-terminalEngine().catch(err => { console.error(`  ${C.red}✗ fatal:${C.reset}`, err.message ?? err); try { rl.close(); } catch(e) {} process.exit(1); });
+terminalEngine().catch(err => {
+    console.error(`  ${C.red}✗ Fatal:${C.reset}`, err.message ?? err);
+    try { rl.close(); } catch(e) {}
+    process.exit(1);
+});
