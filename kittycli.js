@@ -6,6 +6,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import net from 'net';
 import DiscordRPC from 'discord-rpc';
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -34,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.3.0";
+const APP_VERSION = "2.4.0";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -62,15 +63,31 @@ const defaultSettings = {
     discordClientId: "1511784156340818222",
     downloadDir: path.join(os.homedir(), 'Downloads'),
     downloadConcurrency: 2,
-    resumePlayback: true
+    resumePlayback: true,
+    preferredQuality: "auto",
+    cacheTTL: 600000, // 10 minutes
+    cacheMaxSize: 50
 };
 
 let discordRpc = null;
 let discordReady = false;
 const DEBUG = process.argv.includes('--debug');
 function debugLog(...args) { if (DEBUG) console.error('[DEBUG]', ...args); }
+
+// Caches with TTL and size limits
 let searchCache = new Map();
 let episodeListCache = new Map();
+
+function cleanCache(cache, maxSize, ttl) {
+    const now = Date.now();
+    for (const [key, value] of cache.entries()) {
+        if (now - value.timestamp > ttl) cache.delete(key);
+    }
+    if (cache.size > maxSize) {
+        const oldest = Array.from(cache.entries()).sort((a,b) => a[1].timestamp - b[1].timestamp);
+        for (let i = 0; i < oldest.length - maxSize; i++) cache.delete(oldest[i][0]);
+    }
+}
 
 function initDiscordRpc(clientId) {
     if (discordRpc) return;
@@ -222,7 +239,7 @@ function saveProgress(progress) {
     try { fs.writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2), 'utf8'); } catch(e) {}
 }
 
-function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId, position = 0) {
+function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId, position = 0, quality = null) {
     try {
         const list = loadWatchlist();
         const existingIdx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
@@ -232,11 +249,12 @@ function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, 
             hasSub: m.item.hasSub,
             hasDub: m.item.hasDub
         }));
-        const newItem = { title, lastEpisode: episode, audio, timestamp: new Date().toLocaleDateString(), matches: matchesData, totalEpisodes, anilistId, position };
+        const newItem = { title, lastEpisode: episode, audio, timestamp: new Date().toLocaleDateString(), matches: matchesData, totalEpisodes, anilistId, position, quality };
         if (existingIdx !== -1) {
             if (totalEpisodes === undefined && list[existingIdx].totalEpisodes) newItem.totalEpisodes = list[existingIdx].totalEpisodes;
             if (anilistId === undefined && list[existingIdx].anilistId) newItem.anilistId = list[existingIdx].anilistId;
             newItem.position = position || list[existingIdx].position || 0;
+            newItem.quality = quality || list[existingIdx].quality || null;
             list[existingIdx] = newItem;
         } else list.unshift(newItem);
         saveWatchlist(list);
@@ -307,7 +325,10 @@ function loadSettings() {
         discordClientId: typeof stored.discordClientId === "string" && stored.discordClientId.trim() ? stored.discordClientId.trim() : defaultSettings.discordClientId,
         downloadDir: typeof stored.downloadDir === "string" && stored.downloadDir.trim() ? stored.downloadDir.trim() : defaultSettings.downloadDir,
         downloadConcurrency: typeof stored.downloadConcurrency === "number" ? Math.min(Math.max(stored.downloadConcurrency, 1), 5) : defaultSettings.downloadConcurrency,
-        resumePlayback: typeof stored.resumePlayback === "boolean" ? stored.resumePlayback : true
+        resumePlayback: typeof stored.resumePlayback === "boolean" ? stored.resumePlayback : true,
+        preferredQuality: typeof stored.preferredQuality === "string" ? stored.preferredQuality : defaultSettings.preferredQuality,
+        cacheTTL: typeof stored.cacheTTL === "number" ? stored.cacheTTL : defaultSettings.cacheTTL,
+        cacheMaxSize: typeof stored.cacheMaxSize === "number" ? stored.cacheMaxSize : defaultSettings.cacheMaxSize
     };
 }
 
@@ -427,7 +448,7 @@ function getWatchlistInfo(title) {
     const list = loadWatchlist();
     const normalized = normalizeTitle(title);
     const item = list.find(i => normalizeTitle(i.title) === normalized);
-    if (item) return { lastEpisode: item.lastEpisode, totalEpisodes: item.totalEpisodes, audio: item.audio, anilistId: item.anilistId, position: item.position || 0 };
+    if (item) return { lastEpisode: item.lastEpisode, totalEpisodes: item.totalEpisodes, audio: item.audio, anilistId: item.anilistId, position: item.position || 0, quality: item.quality || null };
     return null;
 }
 
@@ -499,6 +520,21 @@ async function downloadSubtitle(subtitleUrl, outputPath) {
     } catch(e) { return false; }
 }
 
+function selectQuality(qualities, preferred) {
+    if (!qualities || qualities.length === 0) return null;
+    // Sort by resolution descending (1080p > 720p > 480p...)
+    const sorted = [...qualities].sort((a,b) => {
+        const getHeight = (q) => {
+            const match = q.match(/(\d+)p/);
+            return match ? parseInt(match[1]) : 0;
+        };
+        return getHeight(b) - getHeight(a);
+    });
+    if (preferred === 'auto') return sorted[0];
+    const found = sorted.find(q => q.toLowerCase().includes(preferred.toLowerCase()));
+    return found || sorted[0];
+}
+
 async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNum, totalEpisodes, audio) {
     if (!isMpvAvailable()) {
         renderBox("error", ["mpv not installed. cannot play video."], C.red);
@@ -507,7 +543,7 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
     if (settings.discordEnabled && discordReady && stream && stream.file) {
         setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, stream.file);
     }
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
         console.log(`\n  ${C.cyan}◈${C.reset} ${C.bold}launching mpv...${C.reset}`);
         const referrer = stream.headers?.Referer || stream.referer || '';
         const origin = stream.headers?.Origin || stream.origin || '';
@@ -521,8 +557,9 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
             `--speed=${settings.playbackSpeed}`,
             `--title=${displayTitle}`
         ];
+        let resumePos = 0;
         if (settings.resumePlayback) {
-            const resumePos = getResumePosition(animeTitle, episodeNum);
+            resumePos = getResumePosition(animeTitle, episodeNum);
             if (resumePos > 5) {
                 baseArgs.push(`--start=${resumePos}`);
                 console.log(`  ${C.dim}resuming from ${Math.floor(resumePos/60)}:${(resumePos%60).toString().padStart(2,'0')}${C.reset}`);
@@ -533,24 +570,55 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
             const extra = settings.mpvArgs.trim().split(/\s+/);
             args = [...baseArgs, ...extra];
         }
+        // Create IPC socket for precise position tracking
+        const socketPath = path.join(os.tmpdir(), `mpv-socket-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`);
+        args.push(`--input-ipc-server=${socketPath}`);
         const mpv = spawn('mpv', args, { stdio: 'inherit' });
-        let lastPosition = 0;
+        let lastPosition = resumePos;
+        let socket = null;
         let positionInterval = null;
-        if (settings.resumePlayback) {
-            positionInterval = setInterval(() => {
-                try {
-                    const status = execSync(`echo '{ "command": ["get_property", "time-pos"] }' | socat - UNIX-CONNECT:/tmp/mpv-socket 2>/dev/null`, { encoding: 'utf8' });
-                    const match = status.match(/\d+\.\d+/);
-                    if (match) {
-                        const pos = parseFloat(match[0]);
-                        if (pos > 5) lastPosition = pos;
+        let retryCount = 0;
+        const connectSocket = () => {
+            if (!settings.resumePlayback) return;
+            const tryConnect = () => {
+                socket = net.createConnection(socketPath, () => {
+                    debugLog('Connected to mpv IPC');
+                    socket.write(JSON.stringify({ command: ["observe_property", 1, "time-pos"] }) + '\n');
+                    positionInterval = setInterval(() => {
+                        if (socket && !socket.destroyed) {
+                            socket.write(JSON.stringify({ command: ["get_property", "time-pos"] }) + '\n');
+                        }
+                    }, 5000);
+                });
+                socket.on('data', (data) => {
+                    try {
+                        const lines = data.toString().split('\n');
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            const msg = JSON.parse(line);
+                            if (msg.event === 'property-change' && msg.name === 'time-pos' && typeof msg.data === 'number') {
+                                if (msg.data > 5) lastPosition = msg.data;
+                            } else if (msg.request_id === undefined && msg.error === undefined && typeof msg.data === 'number') {
+                                if (msg.data > 5) lastPosition = msg.data;
+                            }
+                        }
+                    } catch(e) {}
+                });
+                socket.on('error', (err) => {
+                    debugLog('IPC socket error:', err.message);
+                    if (retryCount < 3) {
+                        retryCount++;
+                        setTimeout(tryConnect, 1000);
                     }
-                } catch(e) {}
-            }, 5000);
-        }
+                });
+            };
+            tryConnect();
+        };
+        connectSocket();
         mpv.on('close', (code) => {
             if (positionInterval) clearInterval(positionInterval);
-            if (settings.resumePlayback && lastPosition > 10) {
+            if (socket) socket.destroy();
+            if (settings.resumePlayback && lastPosition > 10 && Math.abs(lastPosition - resumePos) > 5) {
                 updateWatchlistPosition(animeTitle, episodeNum, lastPosition);
             }
             if (settings.discordEnabled && discordReady) {
@@ -561,8 +629,12 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
         mpv.on('error', (err) => { 
             console.log(`  ${C.red}✗ mpv error: ${err.message}${C.reset}`);
             if (positionInterval) clearInterval(positionInterval);
+            if (socket) socket.destroy();
             if (settings.discordEnabled && discordReady) clearDiscordPresence();
             resolve(false); 
+        });
+        mpv.on('exit', () => {
+            if (socket) socket.destroy();
         });
     });
 }
@@ -891,7 +963,8 @@ async function showHelp() {
         `  • Watchlist with progress tracking`,
         `  • Resumable downloads (HTTP + HLS)`,
         `  • Parallel batch downloads`,
-        `  • Resume playback position`,
+        `  • Resume playback position (IPC)`,
+        `  • Video quality selection (if available)`,
         `  • AniList metadata panel`,
         `  • Discord Rich Presence`,
         `  • System notifications`,
@@ -1047,6 +1120,10 @@ class ApiProvider {
                     }
                 }
             }
+            // Check for quality options
+            if (stream.qualities && Array.isArray(stream.qualities) && stream.qualities.length > 0) {
+                stream.qualities = stream.qualities.map(q => typeof q === 'string' ? q : q.label || q.quality || 'unknown');
+            }
             return stream;
         } catch (err) {
             debugLog(`API error for ${this.name}.extractStreamFromLinkId:`, err.message);
@@ -1163,7 +1240,8 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
     const settings = loadSettings();
     let globalResults;
     const cacheKey = `search:${payload}:${settings.defaultAudio}`;
-    if (settings.cacheSearchResults && searchCache.has(cacheKey) && (Date.now() - searchCache.get(cacheKey).timestamp) < 600000) {
+    cleanCache(searchCache, settings.cacheMaxSize, settings.cacheTTL);
+    if (searchCache.has(cacheKey) && (Date.now() - searchCache.get(cacheKey).timestamp) < settings.cacheTTL) {
         globalResults = searchCache.get(cacheKey).data;
         console.log(`  ${C.dim}Using cached results${C.reset}`);
     } else {
@@ -1173,9 +1251,7 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
             }));
             return results.flat();
         });
-        if (settings.cacheSearchResults) {
-            searchCache.set(cacheKey, { data: globalResults, timestamp: Date.now() });
-        }
+        searchCache.set(cacheKey, { data: globalResults, timestamp: Date.now() });
     }
 
     let flattenedMatches = globalResults.map(match => ({ ...match, score: 0 }));
@@ -1251,9 +1327,10 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     }
 
     const cacheKey = `${coreTitle}|${selectedMatches.map(m => m.provider.name).join(',')}`;
+    cleanCache(episodeListCache, settings.cacheMaxSize, settings.cacheTTL);
     let providerEpLists;
     if (episodeListCache.has(cacheKey)) {
-        providerEpLists = episodeListCache.get(cacheKey);
+        providerEpLists = episodeListCache.get(cacheKey).data;
         console.log(`  ${C.dim}Using cached episode list${C.reset}`);
     } else {
         try {
@@ -1263,7 +1340,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                 }));
                 return lists;
             }, 2);
-            episodeListCache.set(cacheKey, providerEpLists);
+            episodeListCache.set(cacheKey, { data: providerEpLists, timestamp: Date.now() });
         } catch (err) {
             console.log(`  ${C.red}✗ Failed to fetch episodes${C.reset}`);
             return;
@@ -1363,9 +1440,26 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         }
         if (!selectedProvider || !selectedServerId) { renderBox("Error", ["No server selected."], C.red); break; }
         try {
-            const stream = await withSpinner(`Fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));
+            let stream = await withSpinner(`Fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));
             if (!stream?.file && !stream?.url) throw new Error("No video file");
             if (stream && !stream.file && stream.url) stream.file = stream.url;
+            
+            // Quality selection
+            let selectedQuality = null;
+            if (stream.qualities && stream.qualities.length > 1) {
+                const preferredQual = watchInfo?.quality || settings.preferredQuality;
+                selectedQuality = selectQuality(stream.qualities, preferredQual);
+                if (selectedQuality && selectedQuality !== stream.file) {
+                    // If the stream object has separate URLs per quality, choose one.
+                    if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                        stream.file = stream.qualityUrls[selectedQuality];
+                        console.log(`  ${C.dim}Selected quality: ${selectedQuality}${C.reset}`);
+                    } else {
+                        console.log(`  ${C.yellow}⚠ Quality selection not supported by this stream${C.reset}`);
+                    }
+                }
+            }
+            
             if (stream.tracks && stream.tracks.length > 0) {
                 const subChoice = await selectMenuOption(["Download subtitles", "Skip"], `\n  ${C.bold}Subtitles available${C.reset}`, { allowBack: false });
                 if (subChoice === 0) {
@@ -1392,7 +1486,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                 `${C.yellow}${playingTitle}${C.reset}`,
                 `${C.dim}${selectedProvider.name}  ·  ${selectedServerName}  ·${C.reset}  ${audioTag}  ${C.dim}·  ${settings.playbackSpeed}x${C.reset}`
             ], C.green);
-            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0);
+            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality);
             await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio);
             if (targetEpisode < maxEpNum) {
                 console.log(`\n  ${C.green}✓ Episode ${targetEpisode} done${C.reset}`);
@@ -1577,6 +1671,7 @@ async function triggerSettingsWorkflow(providersCount) {
             `Discord RPC     ${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `Download dir    ${C.dim}${settings.downloadDir}${C.reset}`,
             `API base URL    ${C.dim}${settings.apiBaseUrl}${C.reset}`,
+            `Clear cache`,
             `Reset all settings`,
             `Go back`
         ];
@@ -1635,6 +1730,12 @@ async function triggerSettingsWorkflow(providersCount) {
                 if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("Saved", [`API URL → ${settings.apiBaseUrl}`], C.green); await wait(1200); }
                 break;
             case 8:
+                searchCache.clear();
+                episodeListCache.clear();
+                renderBox("Done", ["Cache cleared."], C.green);
+                await wait(1000);
+                break;
+            case 9:
                 saveSettings(defaultSettings);
                 searchCache.clear();
                 episodeListCache.clear();
@@ -1679,7 +1780,8 @@ async function showAbout(providersCount, apiUrl) {
         `  • Watchlist with progress tracking`,
         `  • Resumable downloads (HTTP + HLS)`,
         `  • Parallel batch downloads`,
-        `  • Resume playback position`,
+        `  • Resume playback position (IPC)`,
+        `  • Video quality selection (if available)`,
         `  • Binge mode with countdown`,
         `  • AniList metadata panel`,
         `  • Discord Rich Presence`,
