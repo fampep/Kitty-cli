@@ -1,6 +1,6 @@
 {
   "name": "@fampep/kittycli",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Anime aggregator terminal client with multi-provider support",
   "main": "kittycli.js",
   "bin": {
@@ -12,7 +12,7 @@
     "release": "npm version patch && git push --follow-tags"
   },
   "dependencies": {
-    "@fampep/kittycli": "^2.0.1",
+    "@fampep/kittycli": "^2.2.1",
     "axios": "^1.7.0"
   },
   "keywords": [

@@ -33,7 +33,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.2.1";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 
@@ -124,51 +124,6 @@ async function fetchAnimeMetadata(title) {
         }
     } catch(e) {}
     return null;
-}
-
-async function fetchEpisodesByAnilistId(anilistId, apiBaseUrl) {
-    const base = apiBaseUrl || loadSettings().apiBaseUrl;
-    try {
-        const response = await axios.get(`${base}/anilist/${anilistId}/episodes`, { timeout: 10000 });
-        const data = response.data;
-        if (data && data.episodes && Array.isArray(data.episodes)) {
-            return {
-                totalEpisodes: data.totalEpisodes,
-                episodes: data.episodes.map(ep => ({
-                    number: ep.number,
-                    title: ep.title,
-                    provider: ep.provider
-                }))
-            };
-        }
-        return null;
-    } catch (err) {
-        return null;
-    }
-}
-
-// Unified endpoint: get stream by AniList ID
-async function fetchStreamByAnilistId(anilistId, episodeNumber, audio, apiBaseUrl) {
-    const base = apiBaseUrl || loadSettings().apiBaseUrl;
-    try {
-        const response = await axios.get(`${base}/anilist/${anilistId}/stream/${episodeNumber}`, {
-            params: { audio },
-            timeout: 20000
-        });
-        const data = response.data;
-        if (data && data.stream && data.stream.file) {
-            return {
-                file: data.stream.file,
-                headers: data.stream.headers || {},
-                tracks: data.stream.tracks || [],
-                provider: data.provider,
-                server: data.server
-            };
-        }
-        return null;
-    } catch (err) {
-        return null;
-    }
 }
 
 async function fetchTotalEpisodesFromWorker(title, anilistId, apiBaseUrl) {
@@ -1094,101 +1049,6 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         else if (batchChoice < 0) return;
     }
 
-    let anilistId = null;
-    for (const m of selectedMatches) {
-        const totalData = await fetchTotalEpisodesFromWorker(m.item.title, null, settings.apiBaseUrl);
-        if (totalData && totalData.anilistId) {
-            anilistId = totalData.anilistId;
-            break;
-        }
-    }
-    if (!anilistId) {
-        const metadata = await fetchAnimeMetadata(coreTitle);
-        if (metadata && metadata.anilistId) anilistId = metadata.anilistId;
-    }
-
-    if (anilistId && !isBatchMode) {
-        console.log(`\n  ${C.dim}using AniList ID ${anilistId} (unified endpoint)${C.reset}`);
-        const episodeData = await fetchEpisodesByAnilistId(anilistId, settings.apiBaseUrl);
-        if (episodeData && episodeData.episodes.length) {
-            const maxEpNum = episodeData.episodes.length;
-            const totalEpisodes = episodeData.totalEpisodes || maxEpNum;
-            const titleMap = new Map(episodeData.episodes.map(ep => [ep.number, ep.title]));
-            let targetEpisode = startingEpisode || 1;
-            if (!startingEpisode && !isDownloadMode) {
-                const picked = await selectEpisodeWithMarkers(maxEpNum, totalEpisodes, coreTitle, statusBar, titleMap);
-                if (picked === -1) return;
-                targetEpisode = picked;
-            }
-            if (isDownloadMode) {
-                const stream = await fetchStreamByAnilistId(anilistId, targetEpisode, audio, settings.apiBaseUrl);
-                if (!stream) throw new Error("Could not fetch stream via AniList endpoint");
-                renderBox("stream ready", [stream.file], C.cyan);
-                if (stream.tracks && stream.tracks.length > 0) {
-                    const subChoice = await selectMenuOption(["download subtitles", "skip"], `\n  ${C.bold}subtitles available${C.reset}`, { allowBack: false });
-                    if (subChoice === 0) {
-                        for (let i = 0; i < stream.tracks.length; i++) {
-                            const sub = stream.tracks[i];
-                            const subUrl = sub.file || sub.url;
-                            if (!subUrl) continue;
-                            let ext = '.srt';
-                            const match = subUrl.match(/\.(vtt|ass|srt)(\?|$)/i);
-                            if (match) ext = '.' + match[1].toLowerCase();
-                            const subPath = path.join(process.cwd(), `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${sub.label || sub.lang || 'sub'}${ext}`);
-                            await downloadSubtitle(subUrl, subPath);
-                            console.log(`  ${C.green}✓ subtitle saved: ${subPath}${C.reset}`);
-                        }
-                    }
-                }
-                const copyChoice = await selectMenuOption(["copy url to clipboard", "proceed to download"], `\n  ${C.bold}ready${C.reset}`, { allowBack: false });
-                if (copyChoice === 0) { const copied = await copyToClipboard(stream.file); if (copied) console.log(`  ${C.green}✓ url copied!${C.reset}`); else console.log(`  ${C.red}✗ copy failed (install xclip on linux)${C.reset}`); await wait(1000); }
-                const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
-                const filename = `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${ext}`;
-                await resumeableDownload(stream, filename);
-                return;
-            } else {
-                // Streaming mode
-                let userWantsToContinue = true, currentAudio = audio;
-                while (targetEpisode <= maxEpNum && userWantsToContinue) {
-                    const stream = await withSpinner(`fetching stream for episode ${targetEpisode}...`, async () => {
-                        const s = await fetchStreamByAnilistId(anilistId, targetEpisode, currentAudio, settings.apiBaseUrl);
-                        if (!s) throw new Error("No stream returned");
-                        return s;
-                    });
-                    const episodeDisplay = totalEpisodes ? `Episode ${targetEpisode}/${totalEpisodes}` : `Episode ${targetEpisode}`;
-                    const epTitle = titleMap.get(targetEpisode);
-                    const playingTitle = epTitle ? `${episodeDisplay} — ${epTitle}` : episodeDisplay;
-                    const audioTag = currentAudio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
-                    renderBox("now playing", [
-                        `${C.bold}${C.green}${coreTitle}${C.reset}`,
-                        `${C.yellow}${playingTitle}${C.reset}`,
-                        `${C.dim}provider: ${stream.provider || "auto"}  ·  ${stream.server || "auto"}  ·${C.reset}  ${audioTag}  ${C.dim}·  ${settings.playbackSpeed}x${C.reset}`
-                    ], C.green);
-                    saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, totalEpisodes, anilistId);
-                    await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings);
-                    if (targetEpisode < maxEpNum) {
-                        console.log(`\n  ${C.green}✓ episode ${targetEpisode} done${C.reset}`);
-                        const nextTitle = titleMap.get(targetEpisode + 1) || "";
-                        const result = await bingeCountdownWithProgress(settings.bingeCountdownSeconds, targetEpisode + 1, currentAudio, nextTitle, () => { const newAudio = currentAudio === "sub" ? "dub" : "sub"; updateWatchlistAudio(coreTitle, newAudio); }, settings.autoPlayNext);
-                        if (result.continue) {
-                            if (result.newAudio) {
-                                currentAudio = result.newAudio;
-                                console.log(`  ${C.yellow}◈ switched to ${currentAudio.toUpperCase()}${C.reset}`);
-                            }
-                            targetEpisode++;
-                        } else {
-                            userWantsToContinue = false;
-                        }
-                    } else {
-                        console.log(`  ${C.green}✓ finished last episode!${C.reset}`);
-                        break;
-                    }
-                }
-                return;
-            }
-        }
-        console.log(`  ${C.yellow}⚠ unified endpoint failed, falling back to provider-based...${C.reset}`);
-    }
     let providerEpLists;
     try {
         providerEpLists = await withSpinner(`loading episodes for "${coreTitle}"...`, async () => {
@@ -1293,7 +1153,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             }
         }
         const copyChoice = await selectMenuOption(["copy url to clipboard", "proceed to download"], `\n  ${C.bold}ready${C.reset}`, { allowBack: false });
-        if (copyChoice === 0) { const copied = await copyToClipboard(stream.file); if (copied) console.log(`  ${C.green}✓ url copied!${C.reset}`); else console.log(`  ${C.red}✗ copy failed (install xclip on linux)${C.reset}`); await wait(1000); }
+        if (copyChoice === 0) { const copied = await copyToClipboard(stream.file); if (copied) console.log(`  ${C.green}✓ url copied to clipboard!${C.reset}`); else console.log(`  ${C.red}✗ failed to copy (install xclip on linux)${C.reset}`); }
         const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
         const filename = `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${ext}`;
         await resumeableDownload(stream, filename);
