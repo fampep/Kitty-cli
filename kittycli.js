@@ -35,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.5.0";
+const APP_VERSION = "2.5.1";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -54,7 +54,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const defaultSettings = {
     bingeCountdownSeconds: 8,
     pageSize: 10,
-    apiBaseUrl: "https://fampepanikotoapi.buzz",
+    apiBaseUrl: "https://kittyapi.buzz",
     defaultAudio: "sub",
     mpvArgs: "",
     playbackSpeed: 1.0,
@@ -417,27 +417,40 @@ function clearSearchHistory() { try { if (fs.existsSync(SEARCH_HISTORY_PATH)) fs
 
 function clearScreen() { console.clear(); }
 
-function stripAnsi(value) { return value.replace(/\x1b\[[0-9;]*m/g, ""); }
+// FIXED: Safe string padding functions with bounds checking
+function stripAnsi(value) { 
+    return value.replace(/\x1b\[[0-9;]*m/g, ""); 
+}
 
-function visibleLength(value) { return stripAnsi(value).length; }
+function visibleLength(value) { 
+    return stripAnsi(value).length; 
+}
 
+// FIXED: Ensures we never pass negative values to repeat()
 function padRightVisible(value, width) { 
     const visible = visibleLength(value);
     if (visible >= width) return value;
-    return value + " ".repeat(width - visible); 
+    const padding = Math.max(0, width - visible);
+    return value + " ".repeat(padding); 
 }
 
+// FIXED: Safe box rendering with bounds checking
 function renderBox(title, content, color = C.green) {
     const maxLen = Math.max(title.length, ...content.map(l => visibleLength(l))) + 4;
-    const top = `${color}╭${"─".repeat(maxLen)}╮${C.reset}`;
-    const titleLine = `${color}│${C.reset} ${C.bold}${color}${title}${C.reset}${" ".repeat(maxLen - title.length - 1)}${color}│${C.reset}`;
-    const mid = `${color}├${"─".repeat(maxLen)}┤${C.reset}`;
-    const bottom = `${color}╰${"─".repeat(maxLen)}╯${C.reset}`;
+    const safeLen = Math.max(1, maxLen); // Ensure at least 1
+    
+    const top = `${color}╭${"─".repeat(Math.max(0, safeLen))}╮${C.reset}`;
+    const titlePadding = Math.max(0, safeLen - title.length - 1);
+    const titleLine = `${color}│${C.reset} ${C.bold}${color}${title}${C.reset}${" ".repeat(titlePadding)}${color}│${C.reset}`;
+    const mid = `${color}├${"─".repeat(Math.max(0, safeLen))}┤${C.reset}`;
+    const bottom = `${color}╰${"─".repeat(Math.max(0, safeLen))}╯${C.reset}`;
+    
     console.log(top);
     console.log(titleLine);
     console.log(mid);
     for (const line of content) {
-        console.log(`${color}│${C.reset} ${line}${" ".repeat(maxLen - visibleLength(line) - 1)}${color}│${C.reset}`);
+        const padding = Math.max(0, safeLen - visibleLength(line) - 1);
+        console.log(`${color}│${C.reset} ${line}${" ".repeat(padding)}${color}│${C.reset}`);
     }
     console.log(bottom);
 }
@@ -475,15 +488,16 @@ ${C.cyan}${C.bold}  ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝    
 
 function renderStatusBar(providersCount, apiUrl, additional) {
     const W = process.stdout.columns || 100;
+    const safeW = Math.max(50, W); // Minimum width of 50
     const parts = [
         `${C.bold}${C.green}🐱 kittycli${C.reset} ${C.dim}v${APP_VERSION}${C.reset}`,
         `${C.cyan}${providersCount}${C.reset}${C.dim} providers${C.reset}`,
         `${C.dim}api:${C.reset} ${C.yellow}${apiUrl.length > 30 ? apiUrl.substring(0, 27) + '...' : apiUrl}${C.reset}`,
         additional || `${C.dim}↑↓ move  ↵ select  1-9 jump  q back  ? help${C.reset}`
     ];
-    console.log(`\n${C.dim}${"─".repeat(W)}${C.reset}`);
+    console.log(`\n${C.dim}${"─".repeat(safeW)}${C.reset}`);
     console.log(parts.join(`  ${C.dim}│${C.reset}  `));
-    console.log(`${C.dim}${"─".repeat(W)}${C.reset}`);
+    console.log(`${C.dim}${"─".repeat(safeW)}${C.reset}`);
 }
 
 function normalizeTitle(title) { return title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim(); }
@@ -720,8 +734,8 @@ async function downloadWithFfmpegProgress(url, outputPath) {
                 const percent = (current / duration) * 100;
                 if (Math.floor(percent) > lastProgress) {
                     lastProgress = Math.floor(percent);
-                    const filled = Math.round(percent / 5);
-                    const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+                    const filled = Math.min(20, Math.max(0, Math.round(percent / 5)));
+                    const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, 20 - filled));
                     process.stdout.write(`\r  ${C.cyan}[${bar}]${C.reset} ${C.bold}${percent.toFixed(1)}%${C.reset}  `);
                 }
             }
@@ -809,8 +823,8 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress) 
                     const eta = remaining / ((pd.downloadedBytes - lastBytes) / elapsed);
                     if (onProgress) onProgress(percent, pd.downloadedBytes/1024/1024, pd.totalBytes/1024/1024, speed, eta);
                     else {
-                        const filled = Math.round((pd.downloadedBytes / pd.totalBytes) * 28);
-                        const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(28 - filled)}${C.reset}`;
+                        const filled = Math.min(28, Math.max(0, Math.round((pd.downloadedBytes / pd.totalBytes) * 28)));
+                        const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 28 - filled))}${C.reset}`;
                         process.stdout.write(`\r  [${bar}] ${C.bold}${percent.toFixed(1)}%${C.reset}  ${C.dim}${(pd.downloadedBytes/1024/1024).toFixed(1)}/${(pd.totalBytes/1024/1024).toFixed(1)} MB  ${speed.toFixed(1)} MB/s  eta ${eta.toFixed(0)}s${C.reset}  `);
                     }
                     lastUpdate = now;
@@ -905,6 +919,7 @@ async function selectMenuOption(options, title, config = {}) {
         process.stdin.setRawMode(true);
         readline.emitKeypressEvents(process.stdin);
         const W = process.stdout.columns || 100;
+        const safeW = Math.max(50, W);
         
         const renderMenu = () => {
             clearScreen();
@@ -918,7 +933,7 @@ async function selectMenuOption(options, title, config = {}) {
                 const numberHint = offset < 9 ? `${C.dim}${offset + 1}${C.reset}` : " ";
                 if (idx === currentPos) {
                     const raw = stripAnsi(opt);
-                    const padded = raw.length < W - 8 ? opt + " ".repeat(W - 8 - raw.length) : opt;
+                    const padded = raw.length < safeW - 8 ? opt + " ".repeat(safeW - 8 - raw.length) : opt;
                     console.log(`  ${C.bgGreen}${C.green}${C.bold} > ${numberHint}${C.green}  ${padded} ${C.reset}`);
                 } else {
                     console.log(`  ${C.white}${C.dim}  ${numberHint}${C.reset}  ${opt}${C.reset}`);
@@ -1019,8 +1034,8 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
         process.stdin.setRawMode(true);
         let audio = currentAudio;
         const render = () => {
-            const filled = Math.round((remaining / seconds) * 24);
-            const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(24 - filled)}${C.reset}`;
+            const filled = Math.min(24, Math.max(0, Math.round((remaining / seconds) * 24)));
+            const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 24 - filled))}${C.reset}`;
             const audioTag = audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
             const titleDisplay = nextEpisodeTitle ? ` ${C.dim}—${C.reset} ${C.dim}${nextEpisodeTitle.substring(0, 40)}${C.reset}` : "";
             process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶ Episode ${nextEpisodeNum}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y now  N stop  A audio${C.reset} [${audioTag}]  `);
@@ -1176,6 +1191,7 @@ async function selectServerTwoStep(providerServersMap, audioLabelText, statusBar
     return { provider: selectedProvider, serverId: servers[serverIdx].id, serverName: servers[serverIdx].name };
 }
 
+// FIXED: Safe episode selection with bounds checking for progress bar
 async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBar, titleMap = new Map()) {
     const watchInfo = getWatchlistInfo(title);
     const lastWatched = watchInfo ? watchInfo.lastEpisode : 0;
@@ -1185,9 +1201,9 @@ async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBa
         let denominator = effectiveTotal ? `${C.dim}/${effectiveTotal}${C.reset}` : `${C.dim}/?${C.reset}`;
         let label = `${C.bold}Ep ${i}${C.reset}${denominator}`;
         if (effectiveTotal && effectiveTotal > 0) {
-            const percent = Math.round((i / effectiveTotal) * 100);
-            const filled = Math.round(percent / 10);
-            const minibar = `${C.green}${'▰'.repeat(filled)}${C.reset}${C.dim}${'▱'.repeat(10 - filled)}${C.reset}`;
+            const percent = Math.min(100, Math.max(0, Math.round((i / effectiveTotal) * 100)));
+            const filled = Math.min(10, Math.max(0, Math.round(percent / 10)));
+            const minibar = `${C.green}${'▰'.repeat(filled)}${C.reset}${C.dim}${'▱'.repeat(Math.max(0, 10 - filled))}${C.reset}`;
             label += `  [${minibar}] ${C.dim}${percent}%${C.reset}`;
         }
         const epTitle = titleMap.get(i);
@@ -1211,8 +1227,8 @@ async function showMetadataPanel(title) {
     if (metadata) {
         const content = [];
         if (metadata.rating) {
-            const filled = Math.round(metadata.rating / 2);
-            const stars = `${C.yellow}${'★'.repeat(filled)}${C.reset}${C.dim}${'☆'.repeat(5 - filled)}${C.reset}`;
+            const filled = Math.min(5, Math.max(0, Math.round(metadata.rating / 2)));
+            const stars = `${C.yellow}${'★'.repeat(filled)}${C.reset}${C.dim}${'☆'.repeat(Math.max(0, 5 - filled))}${C.reset}`;
             content.push(`${stars}  ${C.bold}${metadata.rating}${C.reset}${C.dim}/10${C.reset}`);
             content.push('');
         }
