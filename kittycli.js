@@ -74,10 +74,7 @@ const defaultSettings = {
     minSimilarityScore: 25,
     enableNotifications: true,
     autoRetryFailed: true,
-    subtitleLanguage: "english",
     logLevel: "info",
-    autoBackup: true,
-    maxHistorySize: 50,
     confirmBeforeExit: false
 };
 
@@ -97,6 +94,12 @@ function debugLog(...args) {
 let searchCache = new Map();
 let episodeListCache = new Map();
 let streamCache = new Map();
+
+function clearAllCaches() {
+    searchCache.clear();
+    episodeListCache.clear();
+    streamCache.clear();
+}
 
 function cleanCache(cache, maxSize, ttl) {
     const now = Date.now();
@@ -389,7 +392,6 @@ function loadSettings() {
         enableNotifications: typeof stored.enableNotifications === "boolean" ? stored.enableNotifications : defaultSettings.enableNotifications,
         autoRetryFailed: typeof stored.autoRetryFailed === "boolean" ? stored.autoRetryFailed : defaultSettings.autoRetryFailed,
         logLevel: typeof stored.logLevel === "string" ? stored.logLevel : defaultSettings.logLevel,
-        autoBackup: typeof stored.autoBackup === "boolean" ? stored.autoBackup : defaultSettings.autoBackup,
         confirmBeforeExit: typeof stored.confirmBeforeExit === "boolean" ? stored.confirmBeforeExit : defaultSettings.confirmBeforeExit
     };
 }
@@ -933,8 +935,9 @@ async function selectMenuOption(options, title, config = {}) {
                 const numberHint = offset < 9 ? `${C.dim}${offset + 1}${C.reset}` : " ";
                 if (idx === currentPos) {
                     const raw = stripAnsi(opt);
-                    const padded = raw.length < safeW - 8 ? opt + " ".repeat(safeW - 8 - raw.length) : opt;
-                    console.log(`  ${C.bgGreen}${C.green}${C.bold} > ${numberHint}${C.green}  ${padded} ${C.reset}`);
+                    const numStr = offset < 9 ? String(offset + 1) : " ";
+                    const fill = " ".repeat(Math.max(0, safeW - 8 - raw.length));
+                    console.log(`  ${C.bgGreen}${C.black}${C.bold} › ${numStr}  ${raw}${fill}${C.reset}`);
                 } else {
                     console.log(`  ${C.white}${C.dim}  ${numberHint}${C.reset}  ${opt}${C.reset}`);
                 }
@@ -1444,7 +1447,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         return;
     }
 
-    let userWantsToContinue = true, preferredProviderName = null, preferredServerName = null, currentAudio = audio;
+    let userWantsToContinue = true, preferredProviderName = null, preferredServerName = null, currentAudio = audio, retryCount = 0;
     while (targetEpisode <= maxEpNum && userWantsToContinue) {
         const providerServersMap = new Map();
         for (const p of validLists) {
@@ -1526,9 +1529,11 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                     targetEpisode++;
                 } else { userWantsToContinue = false; }
             } else { console.log(`  ${C.green}✓ Finished last episode!${C.reset}`); break; }
+            retryCount = 0;
         } catch (err) {
-            if (settings.autoRetryFailed) {
-                console.log(`  ${C.yellow}⚠ Retrying episode ${targetEpisode}...${C.reset}`);
+            retryCount++;
+            if (settings.autoRetryFailed && retryCount <= settings.maxRetries) {
+                console.log(`  ${C.yellow}⚠ Retry ${retryCount}/${settings.maxRetries} for episode ${targetEpisode}...${C.reset}`);
                 await wait(2000);
                 continue;
             }
@@ -1624,7 +1629,38 @@ async function triggerWatchlistWorkflow(providersList) {
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${targetItem.title}${C.reset}`, { allowBack: true });
     if (actionIdx < 0 || actionIdx === actionOptions.length - 1) return;
     switch (actionIdx) {
-        case 7:
+        case 3: {
+            const newEp = await askNumber(`\n  ${C.yellow}New last watched episode (current: ${targetItem.lastEpisode})${C.reset}  ${C.bold}›${C.reset} `, 0, 9999);
+            updateWatchlistEpisode(targetItem.title, newEp);
+            renderBox("Updated", [`Episode progress → ${newEp}`], C.green);
+            await wait(1000);
+            break;
+        }
+        case 4: {
+            const newAudio = targetItem.audio === "sub" ? "dub" : "sub";
+            updateWatchlistAudio(targetItem.title, newAudio);
+            renderBox("Updated", [`Audio switched to ${newAudio.toUpperCase()}`], C.green);
+            await wait(1000);
+            break;
+        }
+        case 5: {
+            if (targetItem.totalEpisodes && targetItem.totalEpisodes > 0) {
+                updateWatchlistEpisode(targetItem.title, targetItem.totalEpisodes);
+                renderBox("Done", [`${targetItem.title} marked as completed`], C.green);
+            } else {
+                const manualEp = await askNumber(`\n  ${C.yellow}Final episode number${C.reset}  ${C.bold}›${C.reset} `, 1, 9999);
+                updateWatchlistEpisode(targetItem.title, manualEp);
+                renderBox("Done", [`Last episode set to ${manualEp}`], C.green);
+            }
+            await wait(1200);
+            break;
+        }
+        case 6:
+            updateWatchlistEpisode(targetItem.title, 0);
+            renderBox("Updated", [`${targetItem.title} marked as unwatched`], C.green);
+            await wait(1000);
+            break;
+        case 7: {
             const totalData = await fetchTotalEpisodesFromWorker(targetItem.title, targetItem.anilistId, loadSettings().apiBaseUrl);
             if (totalData && totalData.totalEpisodes !== null) {
                 const idx = list.findIndex(item => item.title.toLowerCase() === targetItem.title.toLowerCase());
@@ -1637,40 +1673,13 @@ async function triggerWatchlistWorkflow(providersList) {
             } else { renderBox("Error", ["Could not fetch total episodes."], C.red); }
             await wait(1200);
             break;
+        }
         case 8:
             deleteWatchlistItem(selectedIdx);
             renderBox("Done", ["Removed from watchlist."], C.green);
             await wait(1000);
             break;
-        case 4:
-            const newAudio = targetItem.audio === "sub" ? "dub" : "sub";
-            updateWatchlistAudio(targetItem.title, newAudio);
-            renderBox("Updated", [`Audio switched to ${newAudio.toUpperCase()}`], C.green);
-            await wait(1000);
-            break;
-        case 5:
-            if (targetItem.totalEpisodes && targetItem.totalEpisodes > 0) {
-                updateWatchlistEpisode(targetItem.title, targetItem.totalEpisodes);
-                renderBox("Done", [`${targetItem.title} marked as completed`], C.green);
-            } else {
-                const manualEp = await askNumber(`\n  ${C.yellow}Final episode number${C.reset}  ${C.bold}›${C.reset} `, 1, 9999);
-                updateWatchlistEpisode(targetItem.title, manualEp);
-                renderBox("Done", [`Last episode set to ${manualEp}`], C.green);
-            }
-            await wait(1200);
-            break;
-        case 6:
-            updateWatchlistEpisode(targetItem.title, 0);
-            renderBox("Updated", [`${targetItem.title} marked as unwatched`], C.green);
-            await wait(1000);
-            break;
-        case 3:
-            const newEp = await askNumber(`\n  ${C.yellow}New last watched episode (current: ${targetItem.lastEpisode})${C.reset}  ${C.bold}›${C.reset} `, 0, 9999);
-            updateWatchlistEpisode(targetItem.title, newEp);
-            renderBox("Updated", [`Episode progress → ${newEp}`], C.green);
-            await wait(1000);
-            break;
-        default:
+        default: {
             const mappedMatches = [];
             for (const match of targetItem.matches) {
                 const foundProvider = providersList.find(p => p.name === match.providerName);
@@ -1683,6 +1692,7 @@ async function triggerWatchlistWorkflow(providersList) {
             else if (actionIdx === 2) startEpisode = 1;
             await handleAnimeSelection(mappedMatches, startEpisode, targetItem.audio);
             break;
+        }
     }
 }
 
@@ -1708,21 +1718,24 @@ async function triggerSettingsWorkflow(providersCount) {
         const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ Settings${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
         if (idx < 0 || idx === options.length - 1) return;
         switch (idx) {
-            case 0:
+            case 0: {
                 const values = [3,5,8,10,15,20,30];
                 const valueIdx = await selectMenuOption(values.map(v => `${v}s`), `\n  ${C.bold}${C.cyan}Binge delay${C.reset}`, { allowBack: true });
                 if (valueIdx >= 0) { settings.bingeCountdownSeconds = values[valueIdx]; saveSettings(settings); }
                 break;
-            case 1:
+            }
+            case 1: {
                 const audioOpts = ["Subtitled (sub)", "Dubbed (dub)"];
                 const audioIdx = await selectMenuOption(audioOpts, `\n  ${C.bold}${C.cyan}Default audio${C.reset}`, { allowBack: true });
                 if (audioIdx >= 0) { settings.defaultAudio = audioIdx === 0 ? "sub" : "dub"; saveSettings(settings); }
                 break;
-            case 2:
+            }
+            case 2: {
                 const speeds = [0.75,1.0,1.25,1.5,1.75,2.0];
                 const speedIdx = await selectMenuOption(speeds.map(s => `${s}x`), `\n  ${C.bold}${C.cyan}Playback speed${C.reset}`, { allowBack: true });
                 if (speedIdx >= 0) { settings.playbackSpeed = speeds[speedIdx]; saveSettings(settings); }
                 break;
+            }
             case 3:
                 settings.autoPlayNext = !settings.autoPlayNext;
                 saveSettings(settings);
@@ -1743,7 +1756,7 @@ async function triggerSettingsWorkflow(providersCount) {
                 renderBox("Updated", [`Discord RPC: ${settings.discordEnabled ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
-            case 6:
+            case 6: {
                 const newDir = await askQuestion(`\n  ${C.yellow}Download directory (full path)${C.reset}  ${C.bold}›${C.reset} `);
                 if (newDir.trim()) {
                     const resolved = path.resolve(newDir.trim());
@@ -1753,17 +1766,20 @@ async function triggerSettingsWorkflow(providersCount) {
                     await wait(1200);
                 }
                 break;
-            case 7:
+            }
+            case 7: {
                 const newUrl = await askQuestion(`\n  ${C.yellow}API base URL${C.reset}  ${C.bold}›${C.reset} `);
                 if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("Saved", [`API URL → ${settings.apiBaseUrl}`], C.green); await wait(1200); }
                 break;
-            case 8:
+            }
+            case 8: {
                 const minScore = await askNumber(`\n  ${C.yellow}Minimum similarity score (1-100)${C.reset}  ${C.bold}›${C.reset} `, 1, 100);
                 settings.minSimilarityScore = minScore;
                 saveSettings(settings);
                 renderBox("Saved", [`Min similarity: ${settings.minSimilarityScore}%`], C.green);
                 await wait(1200);
                 break;
+            }
             case 9:
                 settings.enableNotifications = !settings.enableNotifications;
                 saveSettings(settings);
@@ -1859,11 +1875,17 @@ async function terminalEngine() {
         clearScreen();
         renderHeader("KITTYCLI", `v${APP_VERSION}  ·  ${providersCount} providers`);
         const W = 72;
+        const statsRow = (label, value) => {
+            const content = `  ${label}  ${value}`;
+            const pad = " ".repeat(Math.max(0, W - visibleLength(content) - 1));
+            return `  ${C.bold}${C.green}│${C.reset}${content}${pad}${C.bold}${C.green}│${C.reset}`;
+        };
+        const apiDisplay = settings.apiBaseUrl.length > 44 ? settings.apiBaseUrl.substring(0, 41) + '...' : settings.apiBaseUrl;
         console.log(`\n  ${C.bold}${C.green}╭${"─".repeat(W)}╮${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Watchlist${C.reset}  ${C.bold}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 16 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Searches ${C.reset}  ${C.bold}${historyCount}${C.reset} saved${" ".repeat(W - 16 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}API      ${C.reset}  ${C.yellow}${settings.apiBaseUrl.length > 42 ? settings.apiBaseUrl.substring(0, 39) + '...' : settings.apiBaseUrl}${C.reset}${" ".repeat(Math.max(0, W - 11 - Math.min(42, settings.apiBaseUrl.length)))}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Discord   ${C.reset}  ${settings.discordEnabled ? `${C.green}● ON${C.reset}` : `${C.dim}○ OFF${C.reset}`}${" ".repeat(W - 16)}${C.bold}${C.green}│${C.reset}`);
+        console.log(statsRow(`${C.dim}Watchlist${C.reset}`, `${C.bold}${watchlistCount}${C.reset} ${C.dim}item${watchlistCount !== 1 ? 's' : ''}${C.reset}`));
+        console.log(statsRow(`${C.dim}Searches ${C.reset}`, `${C.bold}${historyCount}${C.reset} ${C.dim}saved${C.reset}`));
+        console.log(statsRow(`${C.dim}API      ${C.reset}`, `${C.yellow}${apiDisplay}${C.reset}`));
+        console.log(statsRow(`${C.dim}Discord  ${C.reset}`, settings.discordEnabled ? `${C.green}● ON${C.reset}` : `${C.dim}○ OFF${C.reset}`));
         console.log(`  ${C.bold}${C.green}╰${"─".repeat(W)}╯${C.reset}\n`);
         
         const mainOptions = [
