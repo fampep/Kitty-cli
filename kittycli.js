@@ -1,3004 +1,2202 @@
-import express from 'express';
-import NodeCache from 'node-cache';
-import * as cheerio from 'cheerio';
-import crypto from 'node:crypto';
-import compression from 'compression';
+#!/usr/bin/env node
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+import axios from 'axios';
+import { spawn, execSync, exec } from 'child_process';
+import readline from 'readline';
+import path from 'path';
+import os from 'os';
+import fs from 'fs';
+import net from 'net';
+import DiscordRPC from 'discord-rpc';
 
-const kv = new NodeCache({ stdTTL: 21600, maxKeys: 10000 });
-const kvGet = (key) => kv.get(key) ?? null;
-const kvPut = (key, value, ttl = 21600) => kv.set(key, value, ttl);
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const metadataCache = new Map();
-function getMetadataCache(key) { return metadataCache.get(key); }
-function setMetadataCache(key, value, ttl = 3600000) {
-  metadataCache.set(key, value);
-  setTimeout(() => metadataCache.delete(key), ttl);
-  return value;
+const C = {
+    reset: "\x1b[0m",
+    bold: "\x1b[1m",
+    dim: "\x1b[2m",
+    italic: "\x1b[3m",
+    underline: "\x1b[4m",
+    black: "\x1b[30m",
+    red: "\x1b[31m",
+    green: "\x1b[92m",
+    yellow: "\x1b[93m",
+    blue: "\x1b[94m",
+    magenta: "\x1b[95m",
+    cyan: "\x1b[96m",
+    white: "\x1b[97m",
+    bgBlack: "\x1b[40m",
+    bgRed: "\x1b[41m",
+    bgGreen: "\x1b[42m",
+    bgYellow: "\x1b[43m",
+    bgBlue: "\x1b[44m",
+    bgMagenta: "\x1b[45m",
+    bgCyan: "\x1b[46m",
+    bgWhite: "\x1b[47m"
+};
+
+const APP_VERSION = "2.5.5";
+const GITLAB_PROJECT = "fampep/kitty-cli";
+const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
+const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
+
+const DATA_DIR = path.join(os.homedir(), '.kittycli');
+const WATCHLIST_PATH = path.join(DATA_DIR, 'watchlist.json');
+const SEARCH_HISTORY_PATH = path.join(DATA_DIR, 'search-history.json');
+const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
+const PROGRESS_PATH = path.join(DATA_DIR, 'progress.json');
+const LOG_PATH = path.join(DATA_DIR, 'debug.log');
+
+if (!fs.existsSync(DATA_DIR)) {
+    try { fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o755 }); } catch(e) {}
 }
 
-const USER_AGENT = "Kittycli";
-const ANILIST_URL = "https://graphql.anilist.co";
+const defaultSettings = {
+    bingeCountdownSeconds: 8,
+    pageSize: 10,
+    apiBaseUrl: "https://kittyapi.buzz",
+    defaultAudio: "sub",
+    mpvArgs: "",
+    playbackSpeed: 1.0,
+    enableUpdateCheck: true,
+    autoPlayNext: false,
+    discordEnabled: false,
+    discordClientId: "1511784156340818222",
+    downloadDir: path.join(os.homedir(), 'Downloads'),
+    downloadConcurrency: 2,
+    downloadFormat: "mkv",
+    resumePlayback: true,
+    preferredQuality: "auto",
+    cacheTTL: 600000,
+    cacheMaxSize: 50,
+    maxRetries: 3,
+    requestTimeout: 30000,
+    autoSelectBestMatch: true,
+    minSimilarityScore: 25,
+    enableNotifications: true,
+    autoRetryFailed: true,
+    subtitleLanguage: "english",
+    logLevel: "info",
+    autoBackup: true,
+    maxHistorySize: 50,
+    confirmBeforeExit: false
+};
 
-function sha256(str) {
-  return crypto.createHash('sha256').update(typeof str === 'string' ? str : JSON.stringify(str)).digest('hex');
+let discordRpc = null;
+let discordReady = false;
+let currentDiscordActivity = null;
+const DEBUG = process.argv.includes('--debug');
+
+function debugLog(...args) {
+    if (DEBUG) {
+        const timestamp = new Date().toISOString();
+        console.error('[DEBUG]', ...args);
+        try { fs.appendFileSync(LOG_PATH, `[${timestamp}] ${args.join(' ')}\n`); } catch(e) {}
+    }
 }
 
-const shaCache = new Map();
-async function memoizedSha256(str) {
-  const s = typeof str === 'string' ? str : JSON.stringify(str);
-  if (shaCache.has(s)) return shaCache.get(s);
-  const hash = sha256(s);
-  shaCache.set(s, hash);
-  if (shaCache.size > 2000) {
-    const toDelete = [...shaCache.keys()].slice(0, 500);
-    toDelete.forEach(k => shaCache.delete(k));
-  }
-  return hash;
+let searchCache = new Map();
+let episodeListCache = new Map();
+let streamCache = new Map();
+
+function cleanCache(cache, maxSize, ttl) {
+    const now = Date.now();
+    for (const [key, value] of cache.entries()) {
+        if (now - value.timestamp > ttl) cache.delete(key);
+    }
+    if (cache.size > maxSize) {
+        const oldest = Array.from(cache.entries()).sort((a,b) => a[1].timestamp - b[1].timestamp);
+        for (let i = 0; i < oldest.length - maxSize; i++) cache.delete(oldest[i][0]);
+    }
 }
 
-async function robustFetch(url, options = {}, retries = 1) {
-  const timeout = options.timeout || 10000;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-    const defaultHeaders = { "User-Agent": USER_AGENT };
-    const fetchOptions = {
-      ...options,
-      headers: { ...defaultHeaders, ...(options.headers || {}) },
-      signal: controller.signal,
-    };
+function openUrl(url) {
+    const plat = os.platform();
+    let cmd;
+    if (plat === 'win32') cmd = `start "" "${url}"`;
+    else if (plat === 'darwin') cmd = `open "${url}"`;
+    else cmd = `xdg-open "${url}"`;
+    exec(cmd, (err) => { if (err) debugLog(`Failed to open URL: ${err.message}`); });
+}
+
+function initDiscordRpc(clientId) {
+    if (discordRpc) return;
     try {
-      const res = await fetch(url, fetchOptions);
-      clearTimeout(timeoutId);
-      if (!res.ok && attempt < retries) {
-        await new Promise(r => setTimeout(r, Math.min(300 * Math.pow(2, attempt), 3000)));
-        continue;
-      }
-      const text = await res.text();
-      return {
-        ok: res.ok,
-        status: res.status,
-        text: async () => text,
-        json: async () => JSON.parse(text),
-        headers: res.headers,
-      };
-    } catch (err) {
-      clearTimeout(timeoutId);
-      if (attempt === retries) throw err;
-      const delay = Math.min(500 * Math.pow(2, attempt), 5000);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-  throw new Error(`Failed to fetch ${url}`);
-}
-
-const anilistQueryQueue = [];
-let anilistQueueTimer = null;
-async function flushAnilistQueue() {
-  if (anilistQueryQueue.length === 0) return;
-  const batch = anilistQueryQueue.splice(0, 5);
-  await Promise.all(batch.map(({ resolve, reject, query, variables }) => {
-    const cacheKey = `anilist:${query}:${JSON.stringify(variables)}`;
-    const cached = kvGet(cacheKey);
-    if (cached) return resolve(cached);
-    robustFetch(ANILIST_URL, { method: 'POST', headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }) })
-      .then(res => res.ok ? res.json() : Promise.reject(new Error("AniList query failed")))
-      .then(data => {
-        const result = data.data || {};
-        kvPut(cacheKey, result, 21600);
-        resolve(result);
-      })
-      .catch(reject);
-  }));
-  if (anilistQueryQueue.length > 0) {
-    anilistQueueTimer = setTimeout(flushAnilistQueue, 50);
-  }
-}
-async function anilistQuery(query, variables = {}) {
-  const cacheKey = `anilist:${query}:${JSON.stringify(variables)}`;
-  const cached = kvGet(cacheKey);
-  if (cached) return cached;
-  return new Promise((resolve, reject) => {
-    anilistQueryQueue.push({ resolve, reject, query, variables });
-    if (!anilistQueueTimer) {
-      anilistQueueTimer = setTimeout(flushAnilistQueue, 10);
-    }
-  });
-}
-
-class BaseProvider {
-  constructor(name) { this.name = name; }
-  async search(query, dub) { throw new Error("Not implemented"); }
-  async findEpisodes(seriesUrl) { throw new Error("Not implemented"); }
-  async findAvailableServers(dataIds, audio) { throw new Error("Not implemented"); }
-  async extractStreamFromLinkId(linkId) { throw new Error("Not implemented"); }
-
-  async _cachedSearch(query, dub) {
-    const cacheKey = `search:${this.name.toLowerCase()}:${await memoizedSha256(query + ":" + String(dub))}`;
-    let cached = kvGet(cacheKey);
-    if (cached) return cached;
-    cached = getMetadataCache(cacheKey);
-    if (cached) return cached;
-    const results = await this.search(query, dub);
-    kvPut(cacheKey, results, 1800);
-    setMetadataCache(cacheKey, results, 1800000);
-    return results;
-  }
-
-  async _cachedEpisodes(seriesUrl) {
-    const cacheKey = `episodes:${this.name.toLowerCase()}:${await memoizedSha256(seriesUrl)}`;
-    let cached = kvGet(cacheKey);
-    if (cached) return cached;
-    cached = getMetadataCache(cacheKey);
-    if (cached) return cached;
-    const episodes = await this.findEpisodes(seriesUrl);
-    kvPut(cacheKey, episodes, 3600);
-    setMetadataCache(cacheKey, episodes, 3600000);
-    return episodes;
-  }
-}
-
-class MiruroProvider extends BaseProvider {
-  constructor() {
-    super("Miruro");
-    this.baseUrl = "https://www.miruro.tv";
-  }
-
-  async _fetchHtml(url, options = {}) {
-    const res = await robustFetch(url, {
-      headers: { "User-Agent": USER_AGENT, Referer: this.baseUrl, ...options.headers },
-      ...options,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  }
-
-  async search(query, dub) {
-    let currentUrl = `${this.baseUrl}/search?query=${encodeURIComponent(query)}&sort=POPULARITY_DESC&type=ANIME`;
-    const results = [];
-    while (true) {
-      const html = await this._fetchHtml(currentUrl);
-      const $ = cheerio.load(html);
-      $('a[title][href*="watch"]').each((_, el) => {
-        const href = $(el).attr("href");
-        const title = $(el).attr("title").trim();
-        if (href && title) {
-          results.push({
-            title,
-            url: this.baseUrl + href,
-            hasSub: true,
-            hasDub: true,
-          });
-        }
-      });
-      const nextLink = $('a:contains("Next Page")').attr("href");
-      if (!nextLink) break;
-      currentUrl = this.baseUrl + nextLink;
-    }
-    if (dub) return results.filter(r => r.hasDub);
-    return results;
-  }
-
-  async findEpisodes(seriesUrl) {
-    const html = await this._fetchHtml(seriesUrl);
-    const $ = cheerio.load(html);
-    const episodes = [];
-    const container = $("#episodes-list-container");
-    if (!container.length) return [];
-    container.find("button").each((_, btn) => {
-      const title = $(btn).attr("title")?.trim() || "";
-      const link = $(btn).find("a").attr("href");
-      if (!link) return;
-      const match = link.match(/ep-(\d+)/i);
-      const number = match ? parseInt(match[1], 10) : 0;
-      if (number === 0) return;
-      episodes.push({
-        dataIds: JSON.stringify({ animeUrl: seriesUrl, episodeUrl: this.baseUrl + link, number }),
-        number,
-        title: title || `Episode ${number}`,
-      });
-    });
-    return episodes.sort((a, b) => a.number - b.number);
-  }
-
-  async findAvailableServers(dataIds, audio) {
-    const { animeUrl } = JSON.parse(dataIds);
-    const html = await this._fetchHtml(animeUrl);
-    const $ = cheerio.load(html);
-    const servers = [];
-    const select = $("select").first();
-    if (!select.length) return servers;
-    select.find("option").each((_, opt) => {
-      const value = $(opt).attr("value");
-      const text = $(opt).text().trim().toLowerCase();
-      if (!value) return;
-      if (audio === "sub" && text.includes("sub")) {
-        servers.push({ id: JSON.stringify({ animeUrl, serverValue: value, audio }), name: `Miruro - ${text}` });
-      } else if (audio === "dub" && text.includes("dub")) {
-        servers.push({ id: JSON.stringify({ animeUrl, serverValue: value, audio }), name: `Miruro - ${text}` });
-      } else if (audio === "sub" && !text.includes("dub") && !text.includes("sub")) {
-        servers.push({ id: JSON.stringify({ animeUrl, serverValue: value, audio }), name: `Miruro - ${text}` });
-      }
-    });
-    return servers;
-  }
-
-  async extractStreamFromLinkId(linkId) {
-    const { episodeUrl } = JSON.parse(linkId);
-    const html = await this._fetchHtml(episodeUrl);
-    const $ = cheerio.load(html);
-    const source = $("source").first();
-    if (!source.length) throw new Error("No source element found");
-    const proxyUrl = source.attr("src");
-    if (!proxyUrl) throw new Error("No src attribute");
-    const urlObj = new URL(proxyUrl, this.baseUrl);
-    const encoded = urlObj.searchParams.get("url");
-    if (!encoded) throw new Error("No url parameter");
-    const m3u8Url = decodeURIComponent(encoded);
-    return { headers: { Referer: this.baseUrl }, file: m3u8Url, tracks: [] };
-  }
-}
-
-class AnikotoProvider extends BaseProvider {
-  constructor() {
-    super("Anikoto");
-    this.baseUrl = "https://anikototv.to";
-    this.mirrors = ["https://anikototv.to", "https://anikoto.cz", "https://anikoto.me", "https://anikoto.net", "https://anikototv.se"];
-    this.cache = {};
-  }
-  async resolveBase() {
-    const all = [...new Set([this.baseUrl, ...this.mirrors].map(u => u.replace(/\/+$/, "")))];
-    if (this.cache.base && all.includes(this.cache.base)) {
-      try { if ((await robustFetch(this.cache.base, { method: "HEAD", timeout: 5000 })).ok) return this.cache.base; } catch {}
-    }
-    const winner = await Promise.any(
-      all.map(c => robustFetch(c, { method: "HEAD", timeout: 5000 }).then(r => { if (!r.ok) throw new Error(); return c; }))
-    ).catch(() => null);
-    const base = winner || all[0];
-    this.cache.base = base;
-    this.baseUrl = base;
-    return base;
-  }
-  pageHeaders() { return { Referer: `${this.baseUrl}/` }; }
-  ajaxHeaders() { return { Referer: `${this.baseUrl}/`, "X-Requested-With": "XMLHttpRequest" }; }
-  async search(query, dub) {
-    await this.resolveBase();
-    const res = await robustFetch(`${this.baseUrl}/filter?keyword=${encodeURIComponent(query)}`, { headers: this.pageHeaders() });
-    if (!res.ok) return [];
-    const $ = cheerio.load(await res.text());
-    const results = [];
-    $("div.item").each((_, card) => {
-      const titleLink = $(card).find("a.name.d-title").first();
-      if (!titleLink.length) return;
-      const href = titleLink.attr("href") || $(card).find(".ani.poster.tip a").first().attr("href");
-      if (!href) return;
-      const seriesUrl = this.seriesUrl(href);
-      const title = (titleLink.text() || titleLink.attr("data-jp") || $(card).find("img").first().attr("alt") || "").trim();
-      if (!title) return;
-      const hasDub = $(card).find(".ep-status.dub").length > 0;
-      if (dub && !hasDub) return;
-      results.push({ title, url: seriesUrl, hasDub, hasSub: $(card).find(".ep-status.sub").length > 0 });
-    });
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    await this.resolveBase();
-    const page = await robustFetch(seriesUrl, { headers: this.pageHeaders() });
-    if (!page.ok) return [];
-    const html = await page.text();
-    const $ = cheerio.load(html);
-    let seriesId = $("#watch-main").first().attr("data-id") || $("[id*='watch'][data-id]").first().attr("data-id") || "";
-    if (!seriesId) {
-      const m = html.match(/data-id="(\d+)"/);
-      if (m) seriesId = m[1];
-    }
-    if (!seriesId) return [];
-    const listRes = await robustFetch(`${this.baseUrl}/ajax/episode/list/${seriesId}`, { headers: this.ajaxHeaders() });
-    const listJson = await listRes.json();
-    const $list = cheerio.load(listJson.result || "");
-    const episodes = [];
-    let epNodes = $list("ul.ep-range li > a");
-    if (!epNodes.length) epNodes = $list(".ep-range a");
-    epNodes.each((i, a) => {
-      const dataIds = $list(a).attr("data-ids");
-      if (!dataIds) return;
-      const num = parseInt($list(a).attr("data-num") || "", 10);
-      const number = isNaN(num) ? i + 1 : num;
-      let trueTitle = $list(a).find("span.d-title").first().text().trim() || $list(a).attr("title") || "";
-      if (trueTitle) trueTitle = trueTitle.replace(new RegExp(`^\\s*ep(isode)?\\s*${number}\\s*(-|\\s|:)*`, "i"), "").trim();
-      episodes.push({ dataIds, number, title: trueTitle || "" });
-    });
-    return episodes.sort((a,b) => a.number - b.number);
-  }
-  async findAvailableServers(dataIds, audio) {
-    await this.resolveBase();
-    const res = await robustFetch(`${this.baseUrl}/ajax/server/list?servers=${encodeURIComponent(dataIds)}`, { headers: this.ajaxHeaders() });
-    const html = (await res.json()).result || "";
-    const $ = cheerio.load(html);
-    const servers = [];
-    const groups = audio === "dub" ? ["dub"] : ["sub", "hsub"];
-    groups.forEach(groupType => {
-      $(`.servers .type[data-type="${groupType}"] li[data-link-id]`).each((_, el) => {
-        const id = $(el).attr("data-link-id") || "";
-        const name = $(el).text().trim() || `Server-${id}`;
-        if (id) servers.push({ id, name: `${name} (${groupType.toUpperCase()})` });
-      });
-    });
-    return servers;
-  }
-  async extractStreamFromLinkId(linkId) {
-    await this.resolveBase();
-    const psRes = await robustFetch(`${this.baseUrl}/ajax/server?get=${encodeURIComponent(linkId)}`, { headers: this.ajaxHeaders() });
-    const embedUrl = (await psRes.json())?.result?.url;
-    if (!embedUrl) throw new Error("No embed URL");
-    const origin = new URL(embedUrl).origin;
-    const embedRes = await robustFetch(embedUrl, { headers: { Referer: `${this.baseUrl}/` } });
-    const ehtml = await embedRes.text();
-    const $ = cheerio.load(ehtml);
-    let pId = $("#megaplay-player").first().attr("data-id");
-    if (!pId) {
-      const m = ehtml.match(/data-id="([^"]+)"/);
-      if (m) pId = m[1];
-    }
-    if (!pId) throw new Error("Player ID not found");
-    const srcRes = await robustFetch(`${origin}/stream/getSources?id=${encodeURIComponent(pId)}`, {
-      headers: { Referer: embedUrl, "X-Requested-With": "XMLHttpRequest" }
-    });
-    const data = await srcRes.json();
-    const file = Array.isArray(data.sources) ? data.sources[0]?.file : data.sources.file;
-    if (!file) throw new Error("No video source");
-    return { headers: { Referer: `${origin}/`, Origin: origin }, file, tracks: data.tracks || [] };
-  }
-  seriesUrl(href) {
-    let u = href.startsWith("http") ? href : `${this.baseUrl}${href}`;
-    return u.split('?')[0].split('#')[0].replace(/\/ep-[^/]+\/?$/i, "");
-  }
-}
-
-class AnimeGGProvider extends BaseProvider {
-  constructor() { super("AnimeGG"); this.base = "https://www.animegg.org"; }
-
-  // Last path segment of the series URL, used to build "{slug}-episode-{N}" (matches the reference).
-  _slug(seriesUrl) {
-    const clean = (seriesUrl || "").split("#")[0].split("?")[0].replace(/\/+$/, "");
-    return clean.split("/").pop();
-  }
-
-  _abs(url) {
-    if (!url) return null;
-    if (url.startsWith("//")) return "https:" + url;
-    if (/^https?:\/\//i.test(url)) return url;
-    return this.base + (url.startsWith("/") ? url : "/" + url);
-  }
-
-  // Step 1 (reference): search ".moose.page .mse", title from <h2>, href from the result anchor.
-  async search(query, dub) {
-    if (dub) return [];
-    const res = await robustFetch(`${this.base}/search/?q=${encodeURIComponent(query)}`);
-    if (!res.ok) return [];
-    const $ = cheerio.load(await res.text());
-    const results = [];
-    let cards = $(".moose.page .mse");
-    if (!cards.length) cards = $(".mse"); // fallback if the wrapper markup differs
-    cards.each((_, el) => {
-      const href = $(el).attr("href");
-      if (!href) return;
-      const title = $(el).find("h2").first().text().trim();
-      if (!title) return;
-      results.push({ title, url: this._abs(href), hasSub: true, hasDub: false });
-    });
-    return results;
-  }
-
-  // The reference builds episode URLs straight from the slug ("{slug}-episode-{N}"), so we just
-  // need the set of episode numbers. Collect them from the "-episode-N" links on the series page.
-  async findEpisodes(seriesUrl) {
-    const res = await robustFetch(seriesUrl);
-    if (!res.ok) return [];
-    const html = await res.text();
-    const slug = this._slug(seriesUrl);
-    const numbers = new Set();
-    const $ = cheerio.load(html);
-    $('a[href*="-episode-"]').each((_, a) => {
-      const m = ($(a).attr("href") || "").match(/-episode-(\d+(?:\.\d+)?)/i);
-      if (m) numbers.add(parseFloat(m[1]));
-    });
-    // Fallback: scan the raw HTML for the same pattern if no anchors matched.
-    if (!numbers.size) {
-      for (const m of html.matchAll(/-episode-(\d+(?:\.\d+)?)/gi)) numbers.add(parseFloat(m[1]));
-    }
-    return [...numbers].sort((a, b) => a - b).map(number => ({
-      dataIds: JSON.stringify({ slug, number }),
-      number,
-      title: `Episode ${number}`,
-    }));
-  }
-
-  // Steps 2-3 (reference): build "{base}/{slug}-episode-{N}", then read the embed iframe from
-  // ".tab-content.embed-responsive iframe" and form "{base}/embed/{embedId}".
-  async findAvailableServers(dataIds, audio) {
-    const { slug, number } = JSON.parse(dataIds);
-    const episodeUrl = `${this.base}/${slug}-episode-${number}`;
-    const res = await robustFetch(episodeUrl, { headers: { Referer: this.base } });
-    if (!res.ok) return [];
-    const $ = cheerio.load(await res.text());
-    let embedSrc = $(".tab-content.embed-responsive iframe").attr("src");
-    if (!embedSrc) embedSrc = $("iframe[src]").first().attr("src"); // fallback
-    if (!embedSrc) return [];
-    const embedId = this._abs(embedSrc).split("/").pop();
-    const embedUrl = `${this.base}/embed/${embedId}`;
-    return [{ id: JSON.stringify({ embedUrl, referer: episodeUrl }), name: "AnimeGG" }];
-  }
-
-  // The reference stops at the embed URL; here we go one step further and pull the playable
-  // file out of the embed page so the KittyAPI /stream proxy has a real video to serve.
-  async extractStreamFromLinkId(linkId) {
-    const { embedUrl, referer } = JSON.parse(linkId);
-    const res = await robustFetch(embedUrl, { headers: { Referer: referer || this.base } });
-    if (!res.ok) throw new Error("Failed to fetch embed page");
-    const html = await res.text();
-    const host = new URL(embedUrl).origin;
-
-    const sourceMatch = html.match(/var\s+videoSources\s*=\s*(\[[\s\S]*?\]);?/);
-    if (sourceMatch) {
-      const sources = [];
-      for (const obj of sourceMatch[1].match(/\{[\s\S]*?\}/g) || []) {
-        const file = obj.match(/['"]?file['"]?\s*:\s*['"]([^'"]+)['"]/)?.[1];
-        if (!file) continue;
-        const label = obj.match(/['"]?label['"]?\s*:\s*['"]([^'"]+)['"]/)?.[1] || "";
-        sources.push({ file: file.replace(/\\\//g, "/"), label });
-      }
-      if (sources.length) {
-        const best = sources.find(s => /\.m3u8/i.test(s.file))
-          || sources.reduce((a, b) => ((parseInt(b.label) || 0) > (parseInt(a.label) || 0) ? b : a));
-        return { headers: { Referer: host + "/", Origin: host }, file: this._abs(best.file), tracks: [] };
-      }
-    }
-    // Fallback to the embed URL itself (the reference's raw output).
-    return { headers: { Referer: this.base, Origin: this.base }, file: embedUrl, tracks: [] };
-  }
-}
-
-class AnimeHeavenProvider extends BaseProvider {
-  constructor() { super("AnimeHeaven"); this.base = "https://animeheaven.me"; }
-  async search(query, dub) {
-    if (dub) return [];
-    const res = await robustFetch(`${this.base}/search.php?s=${encodeURIComponent(query)}`);
-    if (!res.ok) return [];
-    const html = await res.text();
-    const results = [];
-    const regex = /<div class='similarimg'>.*?<a href='(anime\.php\?.*?)'><img.*?alt='(.*?)'/gs;
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-      results.push({
-        title: match[2].replace(/&#039;/g, "'"),
-        url: `${this.base}/${match[1]}`,
-        hasSub: true, hasDub: false
-      });
-    }
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const res = await robustFetch(seriesUrl);
-    if (!res.ok) return [];
-    const html = await res.text();
-    const regex = /onclick='gatea\("([a-f0-9]+)"\)'[\s\S]*?<div class='watch2 bc\s*'>(\d+)<\/div>/g;
-    const episodes = [];
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-      episodes.push({ dataIds: match[1], number: parseInt(match[2], 10), title: `Episode ${match[2]}` });
-    }
-    return episodes.sort((a,b) => a.number - b.number);
-  }
-  async findAvailableServers(dataIds, audio) {
-    if (audio !== "sub") return [];
-    return [{ id: JSON.stringify({ gateKey: dataIds }), name: "AnimeHeaven Server" }];
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { gateKey } = JSON.parse(linkId);
-    const res = await robustFetch(`${this.base}/gate.php`, { headers: { Cookie: `key=${gateKey}`, Referer: this.base } });
-    const html = await res.text();
-    let videoUrl = html.match(/<source[^>]+src=['"]([^'"]+\.mp4[^'"]*)['"]/i)?.[1]
-      || html.match(/href='(https?:\/\/ax\.animeheaven\.me\/video\.mp4\?[^']+)'/)?.[1]
-      || (() => { const m = html.match(/video\.mp4\?([a-f0-9]+)&([a-f0-9]+)/); return m ? `https://ax.animeheaven.me/video.mp4?${m[1]}&${m[2]}` : null; })();
-    if (!videoUrl) throw new Error("Video URL not found");
-    return { headers: { Referer: this.base, Origin: this.base }, file: videoUrl, tracks: [] };
-  }
-}
-
-class AniDBProvider extends BaseProvider {
-  constructor() { super("AniDB"); this.base = "https://anidb.app"; }
-  async search(query, dub) {
-    const slug = `/browse?q=${encodeURIComponent(query)}&sort=order_popular&page=1`;
-    const res = await robustFetch(this.base + slug, { headers: this._getHeaders() });
-    if (!res.ok) throw new Error(`Search request failed: ${res.status}`);
-    const $ = cheerio.load(await res.text());
-    const results = [];
-    $(".anime-grid a").each((_, el) => {
-      const name = $(el).find("p").first().text().trim();
-      const link = $(el).attr("href");
-      if (name && link) {
-        results.push({
-          title: name,
-          url: link.startsWith("http") ? link : this.base + link,
-          hasSub: true, hasDub: true,
+        DiscordRPC.register(clientId);
+        discordRpc = new DiscordRPC.Client({ transport: 'ipc' });
+        discordRpc.on('ready', () => {
+            discordReady = true;
+            console.log(`  ${C.green}✓ Discord RPC connected${C.reset}`);
         });
-      }
-    });
-    if (!results.length) throw new Error(`No anime found for "${query}"`);
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const animeIdMatch = seriesUrl.match(/-(\d+)$/);
-    if (!animeIdMatch) throw new Error(`Cannot extract anime ID from ${seriesUrl}`);
-    const animeId = animeIdMatch[1];
-    const detailRes = await robustFetch(seriesUrl, { headers: this._getHeaders() });
-    if (!detailRes.ok) throw new Error(`Detail page fetch failed: ${detailRes.status}`);
-    const $ = cheerio.load(await detailRes.text());
-    const animeType = $(".badge.badge-orange").first().text().toUpperCase();
-    const isMovie = animeType === "MOVIE";
-    const apiRes = await robustFetch(`${this.base}/api/frontend/anime/${animeId}/episodes`, { headers: { ...this._getHeaders(), Accept: "application/json" } });
-    if (!apiRes.ok) throw new Error(`Episodes API failed: ${apiRes.status}`);
-    const data = await apiRes.json();
-    if (!data.episodes?.length) throw new Error("No episodes found");
-    const episodes = [];
-    if (isMovie) {
-      const ep = data.episodes[0];
-      episodes.push({ dataIds: JSON.stringify({ episodeId: String(ep.id), animeId }), number: 1, title: "Movie" });
-    } else {
-      for (let i = 0; i < data.episodes.length; i++) {
-        const ep = data.episodes[i];
-        episodes.push({ dataIds: JSON.stringify({ episodeId: String(ep.id), animeId }), number: i + 1, title: ep.title || `Episode ${i + 1}` });
-      }
+        discordRpc.login({ clientId }).catch(err => {
+            debugLog(`Discord RPC login failed: ${err.message}`);
+            discordReady = false;
+        });
+    } catch(err) {
+        debugLog(`Failed to initialize Discord RPC: ${err.message}`);
+        discordReady = false;
     }
-    return episodes;
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { episodeId, animeId } = JSON.parse(dataIds);
-    const langRes = await robustFetch(`${this.base}/api/frontend/episode/${episodeId}/languages`, { headers: { ...this._getHeaders(), Accept: "application/json" } });
-    if (!langRes.ok) throw new Error(`Languages request failed: ${langRes.status}`);
-    const data = await langRes.json();
-    if (!data.languages?.length) throw new Error("No language streams found");
-    const neededCode = audio === "dub" ? "eng" : "jpn";
-    const langEntry = data.languages.find(l => l.code === neededCode);
-    if (!langEntry) throw new Error(`No ${audio} stream available`);
-    return [{
-      id: JSON.stringify({ episodeId, animeId, embedUrl: langEntry.embed_url, audio }),
-      name: `AniDB ${audio.toUpperCase()} (${langEntry.name || langEntry.code})`,
-    }];
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { embedUrl } = JSON.parse(linkId);
-    if (!embedUrl) throw new Error("No embed URL in linkId");
-    const embedRes = await robustFetch(embedUrl, { headers: this._getHeaders() });
-    if (!embedRes.ok) throw new Error(`Embed fetch failed: ${embedRes.status}`);
-    const embedHtml = await embedRes.text();
-    const startKey = "file: '";
-    const endKey = "', type:";
-    const start = embedHtml.indexOf(startKey);
-    if (start === -1) throw new Error("Could not find 'file:' pattern in embed");
-    const valueStart = start + startKey.length;
-    const valueEnd = embedHtml.indexOf(endKey, valueStart);
-    if (valueEnd === -1) throw new Error("Could not find end of file URL");
-    const streamUrl = embedHtml.substring(valueStart, valueEnd);
-    if (!streamUrl) throw new Error("Extracted stream URL is empty");
-    return { headers: { Origin: this.base, Referer: this.base + "/" }, file: streamUrl, tracks: [] };
-  }
-  async getStats() {
-    const cacheKey = 'anidb:stats';
-    const cached = kvGet(cacheKey);
-    if (cached) return cached;
+}
+
+function setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, streamUrl, providerName, serverName) {
+    if (!discordReady || !discordRpc) return;
+    const state = totalEpisodes
+        ? `Episode ${episodeNum}/${totalEpisodes} · ${audio.toUpperCase()} · ${providerName}`
+        : `Episode ${episodeNum} · ${audio.toUpperCase()} · ${providerName}`;
+    const details = `Watching ${animeTitle.substring(0, 128)}`;
+    if (currentDiscordActivity && currentDiscordActivity.details === details && currentDiscordActivity.state === state) return;
+    currentDiscordActivity = { details, state };
+    discordRpc.setActivity({
+        details: details,
+        state: state,
+        startTimestamp: Date.now(),
+        largeImageKey: 'kitty_logo',
+        largeImageText: `KittyCLI v${APP_VERSION}`,
+        smallImageKey: 'play',
+        smallImageText: 'Streaming',
+        buttons: [
+            { label: '🎬 Watch Episode', url: streamUrl.substring(0, 512) },
+            { label: '🐱 GitHub', url: GITHUB_URL }
+        ],
+        instance: false
+    }).catch(err => debugLog('Discord RPC setActivity error:', err.message));
+}
+
+function clearDiscordPresence() {
+    if (!discordReady || !discordRpc) return;
+    currentDiscordActivity = null;
+    discordRpc.clearActivity().catch(err => debugLog('Discord RPC clear error:', err.message));
+}
+
+function sendNotification(title, message) {
+    const settings = loadSettings();
+    if (!settings.enableNotifications) return;
+    const plat = os.platform();
     try {
-      const [browseRes, homeRes] = await Promise.all([
-        robustFetch(`${this.base}/browse`, { headers: this._getHeaders(), timeout: 10000 }),
-        robustFetch(this.base, { headers: this._getHeaders(), timeout: 10000 }),
-      ]);
-      let totalAnimes = null;
-      if (browseRes.ok) {
-        const $ = cheerio.load(await browseRes.text());
-        const resultsText = $('h1 + div p:contains("results")').text() || $('.text-muted:contains("results")').first().text();
-        const match = resultsText.match(/([\d,]+)\s+results/);
-        if (match) totalAnimes = parseInt(match[1].replace(/,/g, ''), 10);
-      }
-      let totalAiring = null;
-      if (homeRes.ok) {
-        const $ = cheerio.load(await homeRes.text());
-        const airingLink = $('a[href*="status=Currently+Airing"]').first();
-        if (airingLink.length) {
-          const airingText = airingLink.find('p').first().text();
-          const match = airingText.match(/(\d+)/);
-          if (match) totalAiring = parseInt(match[1], 10);
+        if (plat === 'linux') {
+            execSync(`notify-send "${title.replace(/"/g, '\\"')}" "${message.replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
+        } else if (plat === 'darwin') {
+            execSync(`osascript -e 'display notification "${message.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"'`, { stdio: 'ignore' });
+        } else if (plat === 'win32') {
+            const psScript = `New-BurntToastNotification -Text "${title}", "${message}"`;
+            execSync(`powershell -Command "${psScript}"`, { stdio: 'ignore' });
         }
-      }
-      const result = { totalAnimes, totalAiring };
-      kvPut(cacheKey, result, 1800);
-      return result;
-    } catch (err) {
-      console.error(`[AniDB] Failed to fetch stats: ${err.message}`);
-      return { totalAnimes: null, totalAiring: null };
-    }
-  }
-  _getHeaders() {
-    return {
-      Referer: this.base,
-      Origin: this.base,
-      "User-Agent": USER_AGENT,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-    };
-  }
+    } catch(e) { debugLog(`Notification failed: ${e.message}`); }
 }
 
-class SenshiProvider extends BaseProvider {
-  constructor() { super("Senshi"); this.base = "https://senshi.live"; }
-  async search(query, dub) {
-    const data = await this._postJson("/anime/filter", {
-      searchTerm: query, page: "1", limit: "30", sortBy: "score_desc"
-    });
-    const results = [];
-    for (const item of data.data) {
-      const formatted = this._formatAnime(item);
-      results.push({ title: formatted.name, url: this._buildAnimeUrl(formatted.link), hasSub: true, hasDub: true });
+function levenshteinDistance(a, b) {
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            const cost = a[j - 1] === b[i - 1] ? 0 : 1;
+            matrix[i][j] = Math.min(
+                matrix[i-1][j] + 1,
+                matrix[i][j-1] + 1,
+                matrix[i-1][j-1] + cost
+            );
+        }
     }
-    if (!results.length) throw new Error(`No anime found for "${query}"`);
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const animeId = this._extractAnimeId(seriesUrl);
-    if (!animeId) throw new Error(`Cannot extract anime ID from ${seriesUrl}`);
-    const detail = await this._getJson(`/anime/${animeId}`);
-    const type = detail.type;
-    const episodesData = await this._getJson(`/episodes/${animeId}`);
-    const episodes = [];
-    if (type === "Movie") {
-      episodes.push({ dataIds: JSON.stringify({ animeId, episodeId: "1" }), number: 1, title: "Movie" });
-    } else {
-      for (let i = 0; i < episodesData.length; i++) {
-        const ep = episodesData[i];
-        const epNumber = ep.ep_id;
-        const epTitle = ep.ep_title ? `E${epNumber}: ${ep.ep_title}` : `E${epNumber}`;
-        episodes.push({ dataIds: JSON.stringify({ animeId, episodeId: String(epNumber) }), number: epNumber, title: epTitle });
-      }
-    }
-    return episodes;
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { animeId, episodeId } = JSON.parse(dataIds);
-    const streams = await this._getJson(`/episode-embeds/${animeId}/${episodeId}`);
-    if (!streams.length) throw new Error("No video streams found");
-    return streams.map(stream => ({
-      id: JSON.stringify({ url: stream.url, headers: this._getHeaders() }),
-      name: `Senshi - ${stream.status}`
-    }));
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { url, headers } = JSON.parse(linkId);
-    if (!url) throw new Error("No stream URL in linkId");
-    return { file: url, headers, tracks: [] };
-  }
-  async _postJson(path, body) {
-    const res = await robustFetch(this.base + path, {
-      method: "POST",
-      headers: { ...this._getHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
-    return res.json();
-  }
-  async _getJson(path) {
-    const res = await robustFetch(this.base + path, { headers: this._getHeaders() });
-    if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
-    return res.json();
-  }
-  _formatAnime(item) {
-    const anime = item.anime || item;
-    const name = anime.title_english || anime.title;
-    return { name, link: anime.public_id };
-  }
-  _buildAnimeUrl(animeId) { return `${this.base}/watch/${animeId}/1`; }
-  _extractAnimeId(urlOrId) {
-    if (/^\d+$/.test(urlOrId)) return urlOrId;
-    const match = urlOrId.match(/\/(?:watch|anime)\/(\d+)/);
-    return match ? match[1] : null;
-  }
-  _getHeaders() {
-    return { Referer: this.base, Origin: this.base, "User-Agent": USER_AGENT, Accept: "application/json, text/plain, */*" };
-  }
+    return matrix[b.length][a.length];
 }
 
-class AnimetsuProvider extends BaseProvider {
-  constructor() {
-    super("Animetsu");
-    this.baseUrl = "https://animetsu.bz";
-    this.proxyBase = "https://swiftstream.top/proxy";
-    this.apiBase = `${this.baseUrl}/v2/api/anime`;
-    this.titlePref = "english";
-  }
-  _getHeaders(url = this.baseUrl) { return { Referer: url, "User-Agent": USER_AGENT, Accept: "application/json, text/plain, */*" }; }
-  _proxyUrl(url) { return `${this.proxyBase}${url}`; }
-  async _requestJson(slug) {
-    const res = await robustFetch(`${this.apiBase}${slug}`, { headers: this._getHeaders(this.baseUrl) });
-    if (!res.ok) throw new Error(`Animetsu API error: ${res.status}`);
-    return res.json();
-  }
-  async search(query, dub) {
-    const data = await this._requestJson(`/search/?query=${encodeURIComponent(query)}&sort=popularity&page=1&per_page=20`);
-    const results = [];
-    for (const item of data.results || []) {
-      const romaji = item.title.romaji;
-      const pref = item.title[this.titlePref];
-      const title = pref && pref !== romaji ? pref : romaji;
-      results.push({ title, url: String(item.id), hasSub: true, hasDub: true });
-    }
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const id = seriesUrl;
-    const info = await this._requestJson(`/info/${id}`);
-    const eps = await this._requestJson(`/eps/${id}`);
-    const isMovie = info.format === "MOVIE";
-    return eps.map(ep => ({
-      dataIds: JSON.stringify({ id, epNum: ep.ep_num, isMovie, title: info.title?.[this.titlePref] || info.title?.romaji }),
-      number: ep.ep_num,
-      title: ep.name ? `E${ep.ep_num} : ${ep.name}` : `E${ep.ep_num}`,
-    })).sort((a,b) => a.number - b.number);
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { id, epNum } = JSON.parse(dataIds);
-    const token = `${id}/${epNum}`;
-    const serverList = ["pahe", "kite", "meg", "dio", "kiss", "baku"];
-    const settled = await Promise.allSettled(serverList.map(async serverName => {
-      const url = `${this.apiBase}/oppai/${token}?server=${serverName}&source_type=${audio}`;
-      const res = await robustFetch(url, { headers: this._getHeaders(this.baseUrl) });
-      if (!res.ok) return [];
-      const data = await res.json();
-      let subtitles = [];
-      if (["kite", "dio", "baku"].includes(serverName)) {
-        subtitles = (data.subs || []).map(sub => ({ file: this._proxyUrl(sub.url), label: sub.lang || "Unknown", kind: "subtitles", default: false }));
-      }
-      return (data.sources || []).filter(src => src.url).map(src => ({
-        id: JSON.stringify({ url: this._proxyUrl(src.url), headers: this._getHeaders(), subtitles }),
-        name: `${serverName.toUpperCase()} - ${src.quality || "Auto"} (${audio.toUpperCase()})`,
-      }));
-    }));
-    const servers = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
-    if (!servers.length) throw new Error(`No streams found for ${audio}`);
-    return servers;
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { url, headers, subtitles } = JSON.parse(linkId);
-    if (!url) throw new Error("No stream URL");
-    return { file: url, headers, tracks: subtitles || [] };
-  }
+function similarityScore(a, b) {
+    const maxLen = Math.max(a.length, b.length);
+    if (maxLen === 0) return 1;
+    const distance = levenshteinDistance(a.toLowerCase(), b.toLowerCase());
+    return 1 - distance / maxLen;
 }
 
-class AnimeParadiseProvider extends BaseProvider {
-  constructor() { super("AnimeParadise"); this.base = "https://animeparadise.moe"; this.apiBase = "https://api.animeparadise.moe"; this.proxyBase = "https://stream.animeparadise.moe/"; }
-  async _extractFromUrl(path) {
-    const res = await robustFetch(this.base + path, { headers: { "User-Agent": USER_AGENT, Referer: this.base } });
-    if (!res.ok) throw new Error(`Failed to fetch ${path}`);
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const nextData = $("#__NEXT_DATA__").text();
-    if (!nextData) throw new Error("No __NEXT_DATA__ found");
-    return JSON.parse(nextData).props.pageProps;
-  }
-  async _requestAPI(slug) {
-    const res = await robustFetch(`${this.apiBase}/${slug}`, { headers: { "User-Agent": USER_AGENT, Accept: "application/json" } });
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
-    return res.json();
-  }
-  async _extractStreams(streamLink) {
-    const proxyUrl = this.proxyBase + "m3u8?url=" + streamLink;
-    const streams = [{ url: proxyUrl, quality: "Auto" }];
+function stripHtmlTags(text) {
+    if (!text) return '';
+    return text.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
+async function checkForUpdates() {
     try {
-      const res = await robustFetch(proxyUrl, { headers: { "User-Agent": USER_AGENT, Referer: this.base } });
-      if (res.ok) {
-        const body = await res.text();
-        const lines = body.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
-            const resolutionMatch = lines[i].match(/RESOLUTION=(\d+x\d+)/);
-            if (resolutionMatch) {
-              const m3u8Url = lines[i + 1]?.trim();
-              if (m3u8Url) streams.push({ url: this.proxyBase + m3u8Url, quality: resolutionMatch[1] });
+        const response = await axios.get(VERSION_CHECK_URL, { timeout: 5000 });
+        const latest = response.data.tag_name?.replace(/^v/, '');
+        if (latest && latest !== APP_VERSION) return latest;
+        return null;
+    } catch(e) { return null; }
+}
+
+async function fetchAnimeMetadata(title) {
+    try {
+        const query = `
+            query ($search: String) {
+                Media (search: $search, type: ANIME) {
+                    id description(asHtml: false) averageScore genres episodes status coverImage { large } season seasonYear nextAiringEpisode { episode }
+                }
             }
-          }
+        `;
+        const response = await axios.post('https://graphql.anilist.co',
+            { query, variables: { search: title } },
+            { timeout: 5000 }
+        );
+        const media = response.data.data?.Media;
+        if (media) {
+            return {
+                synopsis: media.description ? media.description.substring(0, 500) + (media.description.length > 500 ? '...' : '') : 'No description available.',
+                rating: media.averageScore ? media.averageScore / 10 : undefined,
+                genres: media.genres || [],
+                episodes: media.episodes,
+                season: media.season,
+                seasonYear: media.seasonYear,
+                status: media.status,
+                anilistId: media.id,
+                coverImage: media.coverImage?.large
+            };
         }
-      }
-    } catch {}
-    return streams;
-  }
-  async search(query, dub) {
-    const data = await this._requestAPI(`search?q=${encodeURIComponent(query)}`);
-    const list = data.data || [];
-    return list.map(item => ({ title: item.title, url: item.link, hasSub: true, hasDub: true }));
-  }
-  async findEpisodes(seriesUrl) {
-    let slug = seriesUrl;
-    if (slug.startsWith(this.base)) slug = slug.replace(this.base, "");
-    if (!slug.startsWith("/anime/")) slug = `/anime/${slug}`;
-    const pageProps = await this._extractFromUrl(slug);
-    const animeId = pageProps.data._id;
-    const epData = await this._requestAPI(`anime/${animeId}/episode`);
-    const episodesRaw = epData.data || [];
-    const chapters = episodesRaw.map(ep => ({
-      dataIds: JSON.stringify({ uid: ep.uid, origin: ep.origin, animeId }),
-      number: ep.number,
-      title: ep.title ? `E${ep.number}: ${ep.title}` : `E${ep.number}`,
-    }));
-    return chapters.reverse();
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { uid, origin } = JSON.parse(dataIds);
-    const pageProps = await this._extractFromUrl(`/watch/${uid}?origin=${origin}`);
-    const streamLink = pageProps.episode.streamLink;
-    if (!streamLink) throw new Error("No stream link found");
-    const streams = await this._extractStreams(streamLink);
-    const subtitles = (pageProps.episode.subData || []).map(sub => ({
-      file: `${this.apiBase}/stream/file/${sub.src}`,
-      label: sub.label,
-      kind: "subtitles",
-      default: false,
-    }));
-    return streams.map(stream => ({
-      id: JSON.stringify({ url: stream.url, subtitles, headers: { Referer: this.base, Origin: this.base } }),
-      name: `AnimeParadise - ${stream.quality} (${audio.toUpperCase()})`,
-    }));
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { url, subtitles, headers } = JSON.parse(linkId);
-    if (!url) throw new Error("No stream URL");
-    return { file: url, headers, tracks: subtitles };
-  }
-}
-
-class AniDaoProvider extends BaseProvider {
-  constructor() { super("AniDao"); this.base = "https://anidao.to"; }
-  async search(query, dub) {
-    const res = await robustFetch(`${this.base}/search?q=${encodeURIComponent(query)}`);
-    if (!res.ok) return [];
-    const html = await res.text();
-    const results = [];
-    const cardRegex = /<article class="an-anime-card">([\s\S]*?)<\/article>/g;
-    let match;
-    while ((match = cardRegex.exec(html)) !== null) {
-      const card = match[1];
-      const hrefMatch = card.match(/<a class="an-anime-card__image"[^>]+href="([^"]+)"/);
-      const titleMatch = card.match(/<a class="an-anime-card__image"[^>]+title="([^"]+)"/);
-      if (hrefMatch && titleMatch) {
-        results.push({ title: titleMatch[1].trim(), url: this.base + hrefMatch[1], hasSub: true, hasDub: true });
-      }
-    }
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const res = await robustFetch(seriesUrl);
-    if (!res.ok) return [];
-    const html = await res.text();
-    const episodes = [];
-    const rowRegex = /<article class="an-episode-row">([\s\S]*?)<\/article>/g;
-    let match;
-    while ((match = rowRegex.exec(html)) !== null) {
-      const row = match[1];
-      const hrefMatch = row.match(/<a class="an-episode-row__thumb"[^>]+href="([^"]+)"/);
-      const titleMatch = row.match(/<h3 class="an-episode-row__title"><a[^>]+>([^<]+)<\/a>/);
-      if (!hrefMatch) continue;
-      const epUrl = this.base + hrefMatch[1];
-      const epTitle = titleMatch ? titleMatch[1].trim() : "";
-      const numberMatch = hrefMatch[1].match(/episode-(\d+)$/i);
-      const number = numberMatch ? parseInt(numberMatch[1], 10) : 0;
-      if (number === 0) continue;
-      episodes.push({ dataIds: epUrl, number, title: epTitle || `Episode ${number}` });
-    }
-    const deduped = [];
-    const seenNumbers = new Set();
-    for (const ep of episodes) {
-      if (!seenNumbers.has(ep.number)) {
-        seenNumbers.add(ep.number);
-        deduped.push(ep);
-      }
-    }
-    return deduped.sort((a,b) => a.number - b.number);
-  }
-  async findAvailableServers(dataIds, audio) {
-    const servers = [];
-    const suffix = audio === "sub" ? "SUB" : "DUB";
-    servers.push(
-      { id: JSON.stringify({ episodeUrl: dataIds, serverKey: `HD-2 ${suffix}` }), name: `HD-2 ${suffix}` },
-      { id: JSON.stringify({ episodeUrl: dataIds, serverKey: `StreamHG ${suffix}` }), name: `StreamHG ${suffix}` },
-      { id: JSON.stringify({ episodeUrl: dataIds, serverKey: `Earnvids ${suffix}` }), name: `Earnvids ${suffix}` }
-    );
-    return servers;
-  }
-  unPack(code) {
-    const regex = /eval\(function\(p,a,c,k,e,(?:r|d)\)\{[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)/;
-    const match = code.match(regex);
-    if (!match) return null;
-    let p = match[1];
-    const a = parseInt(match[2], 10);
-    const c = parseInt(match[3], 10);
-    const k = match[4].split('|');
-    const e = (n) => (n < a ? '' : e(Math.floor(n / a))) + ((n = n % a) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
-    for (let i = c - 1; i >= 0; i--) if (k[i]) p = p.replace(new RegExp('\\b' + e(i) + '\\b', 'g'), k[i]);
-    return p.replace(/\\'/g, "'").replace(/\\"/g, '"');
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { episodeUrl, serverKey } = JSON.parse(linkId);
-    const epRes = await robustFetch(episodeUrl);
-    if (!epRes.ok) throw new Error("Failed to fetch episode page");
-    const html = await epRes.text();
-    const serverBtnMap = {
-      "HD-2 SUB": ["hsub-2", "sub-2"], "HD-2 DUB": ["dub-2"],
-      "StreamHG SUB": ["hsub-3", "sub-3"], "StreamHG DUB": ["dub-3"],
-      "Earnvids SUB": ["hsub-4", "sub-4"], "Earnvids DUB": ["dub-4"]
-    };
-    const btnKeys = serverBtnMap[serverKey];
-    if (!btnKeys) throw new Error(`Unknown server: ${serverKey}`);
-    let embedUrl = null;
-    for (const key of btnKeys) {
-      const btnRegex = new RegExp(`data-an-server-btn="${key}"[^>]+data-an-video="([^"]+)"`, "i");
-      const btnRegex2 = new RegExp(`data-an-video="([^"]+)"[^>]+data-an-server-btn="${key}"`, "i");
-      const match = html.match(btnRegex) || html.match(btnRegex2);
-      if (match) { embedUrl = match[1]; break; }
-    }
-    if (!embedUrl) throw new Error(`No embed URL found for server: ${serverKey}`);
-    const embedRes = await robustFetch(embedUrl, { headers: { Referer: this.base } });
-    const embedHtml = await embedRes.text();
-    let videoUrl = null;
-    let headers = { Referer: this.base, Origin: this.base };
-    if (embedUrl.includes("vibeplayer.site")) {
-      const srcMatch = embedHtml.match(/src\s*=\s*["']([^"']+\.m3u8[^"']*)['"]/i) || embedHtml.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/);
-      if (srcMatch) videoUrl = srcMatch[1];
-    } else if (embedUrl.includes("otakuhg.site") || embedUrl.includes("otakuvid.online")) {
-      const unpacked = this.unPack(embedHtml);
-      if (unpacked) {
-        const m3u8Match = unpacked.match(/"(?:hls2|hls3|hls4|hls)":\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/);
-        if (m3u8Match) videoUrl = m3u8Match[1];
-        else { const anyM3u8 = unpacked.match(/(https?:\/\/[^\s"']+\.m3u8[^\s"']*)/); if (anyM3u8) videoUrl = anyM3u8[1]; }
-        if (embedUrl.includes("otakuvid.online")) headers = { Referer: embedUrl };
-      }
-    }
-    if (!videoUrl) throw new Error(`Could not extract stream from ${embedUrl}`);
-    return { headers, file: videoUrl, tracks: [] };
-  }
-}
-
-const ALLANIME_HEX_MAP = {
-  "79":"A","7a":"B","7b":"C","7c":"D","7d":"E","7e":"F","7f":"G","70":"H","71":"I","72":"J","73":"K","74":"L","75":"M","76":"N","77":"O","68":"P","69":"Q","6a":"R","6b":"S","6c":"T","6d":"U","6e":"V","6f":"W","60":"X","61":"Y","62":"Z","59":"a","5a":"b","5b":"c","5c":"d","5d":"e","5e":"f","5f":"g","50":"h","51":"i","52":"j","53":"k","54":"l","55":"m","56":"n","57":"o","48":"p","49":"q","4a":"r","4b":"s","4c":"t","4d":"u","4e":"v","4f":"w","40":"x","41":"y","42":"z","08":"0","09":"1","0a":"2","0b":"3","0c":"4","0d":"5","0e":"6","0f":"7","00":"8","01":"9","15":"-","16":".","67":"_","46":"~","02":":","17":"/","07":"?","1b":"#","63":"[","65":"]","78":"@","19":"!","1c":"$","1e":"&","10":"(","11":")","12":"*","13":"+","14":",","03":";","05":"=","1d":"%"
-};
-function decodeAllanimeUrl(encoded) {
-  if (encoded.startsWith("--")) encoded = encoded.slice(2);
-  let result = "";
-  for (let i = 0; i < encoded.length; i += 2) result += ALLANIME_HEX_MAP[encoded.slice(i,i+2)] || encoded.slice(i,i+2);
-  return result.replace(/\\u002F/gi, "/").replace(/\\\|/g, "");
-}
-const ALLANIME_KEY = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode("Xot36i3lK3:v1")));
-async function decodeTobeparsed(blob) {
-  try {
-    const buf = Uint8Array.from(atob(blob), c=>c.charCodeAt(0));
-    const iv12 = buf.slice(1,13);
-    const iv16 = new Uint8Array(16);
-    iv16.set(iv12); iv16.set([0,0,0,2],12);
-    const ct = buf.slice(13, buf.length-16);
-    const key = await crypto.subtle.importKey('raw', ALLANIME_KEY, { name: 'AES-CTR' }, false, ['decrypt']);
-    const decrypted = await crypto.subtle.decrypt({ name: 'AES-CTR', counter: iv16, length: 128 }, key, ct);
-    const plain = new TextDecoder().decode(decrypted);
-    const sources = [];
-    for (const chunk of plain.split(/[{}]/)) {
-      const urlMatch = chunk.match(/"sourceUrl"\s*:\s*"(--[^"]+)"/);
-      const nameMatch = chunk.match(/"sourceName"\s*:\s*"([^"]+)"/);
-      const prioMatch = chunk.match(/"priority"\s*:\s*([0-9.]+)/);
-      if (urlMatch) sources.push({ sourceUrl: urlMatch[1], sourceName: nameMatch?.[1] || "", priority: prioMatch ? parseFloat(prioMatch[1]) : 0 });
-    }
-    return sources;
-  } catch { return []; }
-}
-async function parseEpisodeSourceUrls(body) {
-  const tbMatch = body.match(/"tobeparsed"\s*:\s*"([^"]+)"/);
-  if (tbMatch) { const sources = await decodeTobeparsed(tbMatch[1]); if (sources.length) return sources; }
-  try { return JSON.parse(body)?.data?.episode?.sourceUrls; } catch { return null; }
-}
-const PROVIDER_PRIORITY = ["S-mp4","Luf-Mp4","Yt-mp4","Default","Sl-Hls"];
-async function trySourceUrls(sourceUrls) {
-  const decoded = sourceUrls.filter(s => s.sourceUrl?.startsWith("--")).map(s => ({ sourceName: s.sourceName || "", priority: s.priority || 0, path: decodeAllanimeUrl(s.sourceUrl).replace("/clock", "/clock.json") })).sort((a,b) => (PROVIDER_PRIORITY.indexOf(a.sourceName)||99) - (PROVIDER_PRIORITY.indexOf(b.sourceName)||99));
-  for (const src of decoded) {
-    let fetchUrl = src.path;
-    if (fetchUrl.startsWith("//")) fetchUrl = "https:" + fetchUrl;
-    else if (fetchUrl.startsWith("/")) fetchUrl = "https://allanime.day" + fetchUrl;
-    else if (!fetchUrl.startsWith("http")) fetchUrl = "https://allanime.day/" + fetchUrl;
-    try {
-      if (fetchUrl.includes("fast4speed.rsvp") || src.sourceName === "Yt-mp4") {
-        const finalUrl = await followRedirects(fetchUrl).catch(() => null);
-        if (!finalUrl) continue;
-        let isGoogleVideoHost = false;
-        try { const host = new URL(finalUrl).hostname.toLowerCase(); isGoogleVideoHost = host === "googlevideo.com" || host.endsWith(".googlevideo.com"); } catch {}
-        if (/\.(mp4|webm|mkv|m3u8)(\?|$)/i.test(finalUrl) || isGoogleVideoHost || (!finalUrl.includes("youtube.com/watch") && !finalUrl.includes("youtu.be/"))) {
-          return { ok: true, url: finalUrl, resolution: "?", sourceName: src.sourceName, isDirectMp4: !finalUrl.includes(".m3u8"), referer: "https://allmanga.to" };
-        }
-        continue;
-      }
-      const linkRes = await robustFetch(fetchUrl, { headers: { Referer: "https://allmanga.to" } });
-      if (!linkRes.ok) continue;
-      const linkJson = await linkRes.json();
-      const links = linkJson?.links;
-      if (!links?.length) continue;
-      const allLinks = links.filter(l => l.link);
-      const mp4Links = allLinks.filter(l => !l.link.includes(".m3u8") && !l.link.includes("master."));
-      const best = (mp4Links.length ? mp4Links : allLinks).sort((a,b) => (parseInt(b.resolutionStr)||0) - (parseInt(a.resolutionStr)||0))[0];
-      if (!best) continue;
-      return { ok: true, url: best.link, resolution: best.resolutionStr || "?", sourceName: src.sourceName, isDirectMp4: !best.link.includes(".m3u8"), referer: "https://allmanga.to" };
-    } catch { continue; }
-  }
-  return null;
-}
-async function followRedirects(urlStr, maxHops = 10) {
-  let hops = 0, currentUrl = urlStr;
-  while (hops < maxHops) {
-    const res = await fetch(currentUrl, { method: "HEAD", redirect: "manual", headers: { "User-Agent": USER_AGENT, Referer: "https://allmanga.to" } });
-    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-      const location = res.headers.get("location");
-      currentUrl = location.startsWith("http") ? location : new URL(location, currentUrl).href;
-      hops++;
-    } else return currentUrl;
-  }
-  return currentUrl;
-}
-
-class AllAnimeProvider extends BaseProvider {
-  constructor() { super("AllAnime"); this.base = "https://allanime.day"; this.episodeCountMap = new Map(); }
-  async _fetchEpisodeSourceUrls(showId, episodeNumber, audio) {
-    const translationType = audio === "dub" ? "dub" : "sub";
-    const epStr = episodeNumber.toString();
-    const candidates = [epStr, epStr.includes(".") ? epStr : epStr + ".0"];
-    for (const attempt of candidates) {
-      const epRes = await robustFetch(`https://api.allanime.day/api?variables=${encodeURIComponent(JSON.stringify({ showId, translationType, episodeString: attempt }))}&extensions=${encodeURIComponent(JSON.stringify({ persistedQuery: { version: 1, sha256Hash: "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec" } }))}`);
-      const body = await epRes.text();
-      const sourceUrls = await parseEpisodeSourceUrls(body);
-      if (sourceUrls?.length) return sourceUrls;
-    }
-    return null;
-  }
-  async search(query, dub) {
-    const translationType = dub ? "dub" : "sub";
-    const vars = { search: { allowAdult: true, allowUnknown: false, query: query.toLowerCase() }, limit: 40, page: 1, translationType, countryOrigin: "ALL" };
-    const res = await robustFetch("https://api.allanime.day/api", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ variables: vars, query: `query($search:SearchInput $limit:Int $page:Int $translationType:VaildTranslationTypeEnumType $countryOrigin:VaildCountryOriginEnumType){shows(search:$search limit:$limit page:$page translationType:$translationType countryOrigin:$countryOrigin){edges{_id name availableEpisodes}}}` }) });
-    if (!res.ok) return [];
-    const edges = (await res.json())?.data?.shows?.edges || [];
-    edges.forEach(e => { if (e.availableEpisodes) this.episodeCountMap.set(e._id, parseInt(e.availableEpisodes)); });
-    return edges.map(e => ({ title: e.name, url: e._id, hasSub: translationType === "sub", hasDub: translationType === "dub" }));
-  }
-  async findEpisodes(seriesUrl) {
-    const totalEp = this.episodeCountMap.get(seriesUrl) || 0;
-    if (!totalEp) return [];
-    const episodes = [];
-    for (let i = 1; i <= totalEp; i++) episodes.push({ dataIds: JSON.stringify({ showId: seriesUrl, episodeNumber: i }), number: i, title: `Episode ${i}` });
-    return episodes;
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { showId, episodeNumber } = JSON.parse(dataIds);
-    const sourceUrls = await this._fetchEpisodeSourceUrls(showId, episodeNumber, audio);
-    if (sourceUrls?.length) {
-      return sourceUrls.filter(s => s.sourceUrl?.startsWith("--")).map(s => ({ id: JSON.stringify({ showId, episodeNumber, audio, source: s }), name: `${s.sourceName || "Unknown"} (${audio.toUpperCase()})` }));
-    }
-    return [{ id: JSON.stringify({ showId, episodeNumber, audio, auto: true }), name: `Auto (Best) (${audio.toUpperCase()})` }];
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { showId, episodeNumber, audio, source, auto } = JSON.parse(linkId);
-    let sourceUrls = null;
-    if (auto) {
-      sourceUrls = await this._fetchEpisodeSourceUrls(showId, episodeNumber, audio);
-      if (!sourceUrls) throw new Error("No sources found");
-    } else if (source) {
-      sourceUrls = [source];
-    } else throw new Error("Invalid linkId");
-    const r = await trySourceUrls(sourceUrls);
-    if (!r || !r.ok) throw new Error("No playable link");
-    return { headers: { Referer: r.referer, Origin: new URL(r.referer).origin }, file: r.url, tracks: [] };
-  }
-}
-
-class AniNekoProvider extends BaseProvider {
-  constructor() {
-    super("AniNeko");
-    this.base = "https://anineko.to";
-    this.serverNameMap = {
-      "sub-1": { name: "HD-1 (SUB) - Hard Sub", type: "hard", audio: "sub" },
-      "sub-2": { name: "HD-2 (SUB) - Hard Sub", type: "hard", audio: "sub" },
-      "sub-3": { name: "StreamHG (SUB) - Subtitle version", type: "soft", audio: "sub" },
-      "sub-4": { name: "Earnvids (SUB) - Subtitle version", type: "soft", audio: "sub" },
-      "sub-5": { name: "Doodstream (SUB) - Subtitle version", type: "soft", audio: "sub" },
-      "dub-1": { name: "HD-1 (DUB) - Hard Sub", type: "hard", audio: "dub" },
-      "dub-2": { name: "HD-2 (DUB) - Hard Sub", type: "hard", audio: "dub" },
-      "dub-3": { name: "StreamHG (DUB) - Subtitle version", type: "soft", audio: "dub" },
-      "dub-4": { name: "Earnvids (DUB) - Subtitle version", type: "soft", audio: "dub" },
-      "dub-5": { name: "Doodstream (DUB) - Subtitle version", type: "soft", audio: "dub" },
-    };
-  }
-  _attr(tag, name) {
-    const m = tag.match(new RegExp(`${name}=["']([^"']*)["']`, "i"));
-    return m ? m[1].replace(/&amp;/g, "&").replace(/&quot;/g, '"') : "";
-  }
-  _stripTags(html) { return (html || "").replace(/<[^>]*>/g, "").trim(); }
-  _decodeEntities(str) {
-    return (str || "")
-      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
-      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-      .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
-  }
-  async _fetchHtml(url, headers = {}) {
-    const res = await robustFetch(url, { headers: { "User-Agent": USER_AGENT, ...headers } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.text();
-  }
-  async _searchSlugs(query) {
-    const html = await this._fetchHtml(`${this.base}/browser?keyword=${encodeURIComponent(query)}`).catch(() => "");
-    const results = [];
-    const regex = /<a\b[^>]*class=["'][^"']*nv-anime-thumb[^"']*["'][^>]*>[\s\S]*?<\/a>/gi;
-    for (const m of html.matchAll(regex)) {
-      const tag = m[0].match(/<a\b[^>]*>/i)?.[0] ?? "";
-      const href = this._attr(tag, "href");
-      const slug = href.match(/\/watch\/([^/?#]+)/)?.[1];
-      if (!slug) continue;
-      const titleMatch = m[0].match(/<(?:h3|[^>]+class=["'][^"']*nv-anime-title[^"']*["'][^>]*)>([\s\S]*?)<\/(?:h3|[^>]+)>/i);
-      results.push({ slug, text: titleMatch ? this._stripTags(titleMatch[1]) : slug.replace(/-/g, " ") });
-    }
-    return results;
-  }
-  async search(query, dub) {
-    const slugResults = await this._searchSlugs(query);
-    return slugResults.map(({ slug, text }) => ({ title: text, url: slug, hasSub: true, hasDub: true }));
-  }
-  async _scrapeSeries(slug) {
-    const html = await this._fetchHtml(`${this.base}/watch/${slug}`);
-    const episodes = [];
-    const regex = /<article\b[^>]*class=["'][^"']*nv-info-episode-item[^"']*["'][^>]*>([\s\S]*?)<\/article>/gi;
-    for (const m of html.matchAll(regex)) {
-      const block = m[1];
-      const link = block.match(/<a\b[^>]*class=["'][^"']*nv-info-episode-main[^"']*["'][^>]*>/i)?.[0] ?? "";
-      const href = this._attr(link, "href");
-      const num = Number(href.match(/\/ep-(\d+)/)?.[1]);
-      if (!Number.isFinite(num)) continue;
-      const title = this._stripTags(block.match(/<a\b[^>]*class=["'][^"']*nv-info-episode-main[^"']*["'][^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i)?.[1] ?? "");
-      const badges = [...block.matchAll(/<span\b[^>]*>([\s\S]*?)<\/span>/gi)].map(b => this._stripTags(b[1]).toLowerCase());
-      episodes.push({ number: num, title: title || `Episode ${num}`, epSlug: `ep-${num}`, hasSub: badges.includes("sub"), hasDub: badges.includes("dub") });
-    }
-    episodes.sort((a, b) => a.number - b.number);
-    const seen = new Set();
-    return episodes.filter(e => (seen.has(e.number) ? false : (seen.add(e.number), true)));
-  }
-  async findEpisodes(seriesUrl) {
-    const episodes = await this._scrapeSeries(seriesUrl);
-    return episodes.map(ep => ({ dataIds: JSON.stringify({ slug: seriesUrl, epSlug: ep.epSlug }), number: ep.number, title: ep.title, hasSub: ep.hasSub, hasDub: ep.hasDub }));
-  }
-  async _extractVideoAndTracks(embedUrl) {
-    const html = await this._fetchHtml(embedUrl, { Referer: `${this.base}/` }).catch(() => "");
-    let videoUrl = null;
-    const tracks = [];
-    const patterns = [
-      /const\s+src\s*=\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
-      /file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
-      /["'](https?:\/\/[^"']+\/master\.m3u8[^"']*)["']/i,
-      /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
-    ];
-    for (const pattern of patterns) {
-      const m = html.match(pattern);
-      if (m) { videoUrl = this._decodeEntities(m[1]); break; }
-    }
-    const trackRegex = /<track[^>]+src=["']([^"']+\.(?:vtt|ass))["'][^>]*/gi;
-    let trackMatch;
-    while ((trackMatch = trackRegex.exec(html)) !== null) {
-      const src = trackMatch[1];
-      let label = "Unknown";
-      const labelMatch = html.match(/label=["']([^"']+)["']/i);
-      if (labelMatch) label = labelMatch[1];
-      const isDefault = html.includes("default") || html.includes("selected");
-      tracks.push({ file: src.startsWith("http") ? src : new URL(src, embedUrl).href, label, kind: "subtitles", default: isDefault });
-    }
-    return { videoUrl, tracks };
-  }
-  async _scrapeEpisodeWatch(seriesSlug, epSlug, audio) {
-    const html = await this._fetchHtml(`${this.base}/watch/${seriesSlug}/${epSlug}`, { Referer: `${this.base}/watch/${seriesSlug}` });
-    const servers = [];
-    const panelRegex = /<div\b[^>]*class=["'][^"']*nv-server-grid[^"']*["'][^>]*data-id=["']([^"']+)["'][^>]*>([\s\S]*?)(?=<div\b[^>]*class=["'][^"']*nv-server-grid|$)/gi;
-    let panelMatch;
-    while ((panelMatch = panelRegex.exec(html)) !== null) {
-      const serverId = panelMatch[1];
-      const panelContent = panelMatch[2];
-      const panelAudio = serverId.startsWith("dub") ? "dub" : "sub";
-      if (panelAudio !== audio) continue;
-      const btnRegex = /data-video=["']([^"']+)["']/gi;
-      let btnMatch;
-      while ((btnMatch = btnRegex.exec(panelContent)) !== null) {
-        const embedUrl = this._decodeEntities(btnMatch[1]);
-        const serverInfo = this.serverNameMap[serverId] || { name: `${serverId.toUpperCase()} (${audio.toUpperCase()})`, type: "hard", audio };
-        servers.push({ id: serverId, name: serverInfo.name, type: serverInfo.type, embedUrl });
-      }
-    }
-    return servers;
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { slug, epSlug } = JSON.parse(dataIds);
-    const servers = await this._scrapeEpisodeWatch(slug, epSlug, audio);
-    return servers.map(server => ({ id: JSON.stringify({ embedUrl: server.embedUrl, type: server.type, audio, slug }), name: server.name }));
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { embedUrl, type } = JSON.parse(linkId);
-    const { videoUrl, tracks } = await this._extractVideoAndTracks(embedUrl);
-    if (!videoUrl) throw new Error("No video stream found");
-    return { headers: { Referer: this.base, Origin: this.base }, file: videoUrl, tracks: type === "soft" ? tracks : [] };
-  }
-}
-
-async function pbkdf2(password, salt, iterations, keylen) {
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']);
-  const derivedBits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode(salt), iterations, hash: 'SHA-256' }, keyMaterial, keylen * 8);
-  return new Uint8Array(derivedBits);
-}
-
-class ReAnimeProvider extends BaseProvider {
-  constructor() { super("ReAnime"); this.base = "https://reanime.to"; this.flix = "https://flixcloud.cc"; this.userAgent = USER_AGENT; }
-  async sha256hex(s) { return memoizedSha256(s); }
-  b64toU8(b64) { return Uint8Array.from(atob(b64), c=>c.charCodeAt(0)); }
-  async deriveFields(seed) {
-    let e = seed;
-    for (let i=0;i<3;i++) e = await this.sha256hex(e + i);
-    let l = e;
-    for (let i=0;i<3;i++) l = await this.sha256hex(l + i);
-    return { keyField: "kf_"+e.substring(8,16), ivField: "ivf_"+e.substring(16,24), containerName: "cd_"+e.substring(24,32), arrayName: "ad_"+e.substring(32,40), objectName: "od_"+e.substring(40,48), tokenField: e.substring(48,64)+"_"+e.substring(56,64), keyFrag2Field: l.substring(0,16)+"_"+l.substring(16,24) };
-  }
-  extractSsrObj(html) {
-    const m = html.match(/\{type:"data",data:(\{)/);
-    if (!m) throw new Error("SSR data block not found");
-    let depth = 0;
-    const start = html.indexOf("{", m.index + m[0].length - 1);
-    for (let i = start; i < html.length; i++) {
-      if (html[i] === "{") depth++;
-      else if (html[i] === "}") { if (--depth === 0) return html.slice(start, i+1); }
-    }
-    throw new Error("SSR brace matching failed");
-  }
-  parseJsLiteral(src) {
-    let i=0;
-    const ws=()=>{while(i<src.length && /\s/.test(src[i])) i++;};
-    const parseValue=()=>{
-      ws();
-      if(src[i]==="{") return parseObject();
-      if(src[i]==="[") return parseArray();
-      if(src[i]==='"') return parseDStr();
-      if(src[i]==="'") return parseSStr();
-      if(src.startsWith("true",i)){i+=4; return true;}
-      if(src.startsWith("false",i)){i+=5; return false;}
-      if(src.startsWith("null",i)){i+=4; return null;}
-      if(src.startsWith("undefined",i)){i+=9; return null;}
-      if(src.startsWith("!0",i)){i+=2; return true;}
-      if(src.startsWith("!1",i)){i+=2; return false;}
-      const m=src.slice(i).match(/^-?[\d.]+([eE][+-]?\d+)?/);
-      if(m){i+=m[0].length; return parseFloat(m[0]);}
-      throw new Error(`JS parse error at pos ${i}`);
-    };
-    const parseDStr=()=>{
-      let r=""; i++;
-      while(i<src.length && src[i]!=='"'){
-        if(src[i]==='\\'){i++; const e={n:"\n",t:"\t",r:"\r",'"':'"',"\\":"\\"}; r+=e[src[i]]??src[i]; i++;}
-        else r+=src[i++];
-      }
-      i++; return r;
-    };
-    const parseSStr=()=>{
-      let r=""; i++;
-      while(i<src.length && src[i]!="'"){
-        if(src[i]==='\\'){i++; r+=src[i]==="'"?"'":{n:"\n",t:"\t",r:"\r",'"':'"',"\\":"\\"}[src[i]]??src[i]; i++;}
-        else r+=src[i++];
-      }
-      i++; return r;
-    };
-    const parseKey=()=>{
-      ws();
-      if(src[i]==='"') return parseDStr();
-      if(src[i]==="'") return parseSStr();
-      const m=src.slice(i).match(/^[a-zA-Z_$][a-zA-Z0-9_$]*/);
-      if(m){i+=m[0].length; return m[0];}
-      throw new Error(`Bad key at pos ${i}`);
-    };
-    const parseObject=()=>{
-      const obj={}; i++; ws();
-      while(i<src.length && src[i]!=="}"){
-        if(src[i]===","){i++; ws(); continue;}
-        const k=parseKey(); ws(); i++;
-        obj[k]=parseValue(); ws();
-      }
-      i++; return obj;
-    };
-    const parseArray=()=>{
-      const arr=[]; i++; ws();
-      while(i<src.length && src[i]!=="]"){
-        if(src[i]===","){i++; ws(); continue;}
-        arr.push(parseValue()); ws();
-      }
-      i++; return arr;
-    };
-    return parseValue();
-  }
-  parseWasmDecrypt(wasmBytes) {
-    const b = wasmBytes;
-    let pos = 8;
-    while (pos < b.length) {
-      const secId = b[pos++];
-      let sz=0, sh=0, by;
-      do { by = b[pos++]; sz |= (by & 127) << sh; sh += 7; } while (by & 128);
-      if (secId === 10) { pos++; let sbs=0, sh2=0, by2; do { by2 = b[pos++]; sbs |= (by2 & 127) << sh2; sh2 += 7; } while (by2 & 128); pos += sbs; break; }
-      pos += sz;
-    }
-    let rbs=0, sh3=0, by3;
-    do { by3 = b[pos++]; rbs |= (by3 & 127) << sh3; sh3 += 7; } while (by3 & 128);
-    const r = b.slice(pos, pos + rbs);
-    const leb = (arr, idx) => { let v=0, s=0, b2; do { b2 = arr[idx++]; v |= (b2 & 127) << s; s += 7; } while (b2 & 128); return [v, idx]; };
-    const XOR_END = [32,2,32,5,106,45,0,0,115,33,6];
-    let txStart = -1;
-    outer: for (let i=0; i<r.length-XOR_END.length; i++) {
-      for (let j=0; j<XOR_END.length; j++) if (r[i+j] !== XOR_END[j]) continue outer;
-      txStart = i + XOR_END.length; break;
-    }
-    if (txStart < 0) throw new Error("WASM: transform start not found");
-    let txEnd = -1, step = 36;
-    for (let i=txStart; i<r.length-4; i++) {
-      if (r[i] === 32 && r[i+1] === 5 && r[i+2] === 65) {
-        const [val, ni] = leb(r, i+3);
-        if (r[ni] === 108) { txEnd = i; step = val; break; }
-      }
-    }
-    if (txEnd < 0) throw new Error("WASM: keystream not found");
-    const code = r.slice(txStart, txEnd);
-    const transform = (inputByte) => {
-      let local6 = inputByte & 255;
-      const stk = [];
-      let ip = 0;
-      while (ip < code.length) {
-        const op = code[ip++];
-        if (op === 32) {
-          const [idx, ni] = leb(code, ip);
-          ip = ni;
-          stk.push(idx === 6 ? local6 : 0);
-        } else if (op === 33) {
-          const [idx, ni] = leb(code, ip);
-          ip = ni;
-          const v = stk.pop();
-          if (idx === 6) local6 = v & 255;
-        } else if (op === 65) {
-          const [v, ni] = leb(code, ip);
-          ip = ni;
-          stk.push(v);
-        } else if (op === 106) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a + b2) & 255);
-        } else if (op === 107) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a - b2 + 256) & 255);
-        } else if (op === 113) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a & b2) & 255);
-        } else if (op === 114) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a | b2) & 255);
-        } else if (op === 115) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a ^ b2) & 255);
-        } else if (op === 116) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a << (b2 & 7)) & 255);
-        } else if (op === 118) {
-          const b2 = stk.pop(), a = stk.pop();
-          stk.push((a >>> (b2 & 7)) & 255);
-        }
-      }
-      return local6;
-    };
-    return { step, transform };
-  }
-  runDecrypt(wasmBytes, frag1, kf2, T, seedInt) {
-    const { step, transform } = this.parseWasmDecrypt(wasmBytes);
-    const out = new Uint8Array(frag1.length);
-    for (let i=0; i<frag1.length; i++) {
-      const c = (frag1[i] ^ kf2[i] ^ T[i]) & 255;
-      out[i] = transform(c) ^ ((i * step + seedInt) & 255);
-    }
-    return out;
-  }
-  async decryptEmbed(html) {
-    const raw = this.extractSsrObj(html);
-    const data = this.parseJsLiteral(raw);
-    const seed = data.obfuscation_seed;
-    if (!seed) throw new Error("obfuscation_seed missing");
-    const fields = await this.deriveFields(seed);
-    const ocd = data.obfuscated_crypto_data;
-    if (!ocd) throw new Error("obfuscated_crypto_data missing");
-    const container = ocd[fields.containerName];
-    if (!container) throw new Error(`containerName "${fields.containerName}" not in ocd`);
-    const arr = container[fields.arrayName];
-    if (!arr) throw new Error(`arrayName "${fields.arrayName}" not in container`);
-    const obj = arr[0][fields.objectName];
-    if (!obj) throw new Error(`objectName "${fields.objectName}" not in arr[0]`);
-    const frag1 = this.b64toU8(obj[fields.keyField]);
-    const iv = this.b64toU8(obj[fields.ivField]);
-    const kf2raw = data[fields.keyFrag2Field];
-    if (!kf2raw) throw new Error(`kf2 field "${fields.keyFrag2Field}" not in data`);
-    const kf2 = this.b64toU8(kf2raw);
-    const token = data[fields.tokenField];
-    if (!token) throw new Error(`tokenField "${fields.tokenField}" missing`);
-    const tokRes = await robustFetch(`${this.flix}/api/m3u8/${token}`, { headers: { "User-Agent": this.userAgent, Referer: `${this.base}/` } });
-    if (!tokRes.ok) throw new Error(`Token API ${tokRes.status}`);
-    const tokData = await tokRes.json();
-    const vidKey = (await this.sha256hex(token + "vid")).substring(0,10);
-    const keyKey = (await this.sha256hex(token + "key")).substring(0,10);
-    const v_bytes = this.b64toU8(tokData[vidKey]);
-    const T_bytes = this.b64toU8(tokData[keyKey]);
-    if (!v_bytes.length || !T_bytes.length) throw new Error("Token fields missing");
-    const seedInt = parseInt(seed.substring(0,8), 16);
-    const wPayload = this.b64toU8(data.w_payload ?? "");
-    if (!wPayload.length) throw new Error("w_payload missing");
-    const wasmOut = this.runDecrypt(wPayload, frag1, kf2, T_bytes, seedInt);
-    const derivedKey = await pbkdf2(String.fromCharCode(...wasmOut), seed, 1000, 32);
-    for (let i=0;i<32;i++) derivedKey[i] ^= seed.charCodeAt(i % seed.length);
-    const aesKey = await crypto.subtle.digest('SHA-256', derivedKey);
-    const aesKeyBuffer = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']);
-    const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, aesKeyBuffer, v_bytes);
-    let plain = new TextDecoder().decode(decrypted);
-    plain = plain.trim().replace(/\0+$/, "");
-    if (!plain.startsWith("http")) throw new Error(`Unexpected decrypted value: ${plain.substring(0,60)}`);
-    return { url: plain, subtitles: data.subtitles ?? [], thumbnails_vtt: data.thumbnails_vtt ?? null, video_title: data.video_title ?? null, intro_chapter: data.intro_chapter ?? null, outro_chapter: data.outro_chapter ?? null, video_id: data.video_id ?? null };
-  }
-  async resolveIds(anilistId) {
-    const cacheKey = `reanime:ids:${anilistId}`;
-    const cached = await kvGet(cacheKey);
-    if (cached) return cached;
-    const media = await anilistQuery(`query ($id: Int) { Media(id: $id, type: ANIME) { idMal title { romaji english } } }`, { id: parseInt(anilistId) });
-    const mediaData = media?.Media;
-    if (!mediaData) throw new Error(`AniList ID ${anilistId} not found`);
-    const title = mediaData.title.english || mediaData.title.romaji;
-    const malId = mediaData.idMal;
-    let anizip = null;
-    try { const zipRes = await robustFetch(`https://api.ani.zip/mappings?anilist_id=${anilistId}`); anizip = await zipRes.json(); } catch {}
-    const result = { title, malId, anizip };
-    await kvPut(cacheKey, result, 21600);
-    return result;
-  }
-  async findSlug(title) {
-    const cacheKey = `reanime:slug:${await memoizedSha256(title)}`;
-    const cached = await kvGet(cacheKey);
-    if (cached) return cached;
-    const res = await robustFetch(`${this.base}/api/search?${new URLSearchParams({ q: title, limit: 5 })}`, { headers: { "User-Agent": this.userAgent } });
-    const data = await res.json();
-    const results = Array.isArray(data) ? data : (data.results ?? data.data ?? []);
-    if (!results.length) throw new Error(`No reanime results for "${title}"`);
-    const id = results[0].anime_id ?? results[0].slug ?? results[0].id;
-    if (!id) throw new Error("Could not extract anime_id");
-    await kvPut(cacheKey, id, 86400);
-    return id;
-  }
-  async jikanFetch(url, retries=4) {
-    for (let attempt=0; attempt<=retries; attempt++) {
-      const res = await robustFetch(url, { headers: { "User-Agent": this.userAgent, Accept: "application/json" } });
-      if (res.status === 429) {
-        const wait = (parseInt(res.headers.get("retry-after")||"1")*1000) + (attempt*500);
-        if (attempt < retries) { await new Promise(r=>setTimeout(r,wait)); continue; }
-        return null;
-      }
-      if (res.ok) return res.json();
-      return null;
-    }
-    return null;
-  }
-  async getJikanEpisodes(malId, page) { const data = await this.jikanFetch(`https://api.jikan.moe/v4/anime/${malId}/episodes?page=${page}`); return data || { data: [], pagination: { last_visible_page: 1, has_next_page: false } }; }
-  async search(query, dub) {
-    const gql = `query ($search: String, $page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { media(search: $search, type: ANIME, sort: SEARCH_MATCH) { id title { romaji english } } } }`;
-    const data = await anilistQuery(gql, { search: query, page: 1, perPage: 20 });
-    const mediaList = data?.Page?.media || [];
-    return mediaList.map(m => ({ title: m.title.english || m.title.romaji, url: String(m.id), hasSub: true, hasDub: true }));
-  }
-  async findEpisodes(seriesUrl) {
-    const anilistId = parseInt(seriesUrl,10);
-    if (isNaN(anilistId)) return [];
-    const { title, malId, anizip } = await this.resolveIds(anilistId);
-    let episodes = [];
-    if (!malId && anizip?.episodes) {
-      const eps = Object.entries(anizip.episodes).map(([num]) => parseInt(num));
-      eps.sort((a,b)=>a-b);
-      for (const num of eps) episodes.push({ dataIds: JSON.stringify({ anilistId, episodeNumber: num }), number: num, title: `Episode ${num}` });
-    } else if (malId) {
-      const first = await this.getJikanEpisodes(malId, 1);
-      const lastPage = first.pagination?.last_visible_page || 1;
-      let allEps = [...first.data];
-      if (lastPage > 1) {
-        const pages = await Promise.all(Array.from({ length: lastPage - 1 }, (_, i) => this.getJikanEpisodes(malId, i + 2)));
-        allEps = allEps.concat(pages.flatMap(p => p.data));
-      }
-      for (const ep of allEps) episodes.push({ dataIds: JSON.stringify({ anilistId, episodeNumber: ep.mal_id }), number: ep.mal_id, title: ep.title || `Episode ${ep.mal_id}` });
-    }
-    return episodes.sort((a,b)=>a.number-b.number);
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { anilistId, episodeNumber } = JSON.parse(dataIds);
-    const { title } = await this.resolveIds(anilistId);
-    const slug = await this.findSlug(title);
-    const [watchRes, flixRes] = await Promise.allSettled([
-      robustFetch(`${this.base}/api/watch/${slug}/${episodeNumber}`, { headers: { "User-Agent": this.userAgent } }),
-      robustFetch(`${this.base}/api/flix/${anilistId}/${episodeNumber}`, { headers: { "User-Agent": this.userAgent } })
-    ]);
-    const watchData = watchRes.status === "fulfilled" ? await watchRes.value.json() : null;
-    const flixData = flixRes.status === "fulfilled" ? await flixRes.value.json() : null;
-    const links = [...(watchData?.episode_links || [])];
-    if (flixData?.success && flixData?.servers) {
-      const seen = new Set(links.map(s=>s.$id));
-      for (const s of flixData.servers) if (!seen.has(s.$id)) links.push(s);
-    }
-    const audioTypes = audio === "sub" ? ["sub","s-sub"] : ["dub","s-dub"];
-    return links.filter(s=>audioTypes.includes(s.dataType)).map(s=>({ id: JSON.stringify({ anilistId, episodeNumber, audio, dataLink: s.dataLink, serverName: s.serverName }), name: `${s.serverName} (${audio.toUpperCase()})` }));
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { dataLink } = JSON.parse(linkId);
-    const embedRes = await robustFetch(dataLink, { headers: { "User-Agent": this.userAgent, Referer: `${this.base}/` } });
-    const embedHtml = await embedRes.text();
-    const stream = await this.decryptEmbed(embedHtml);
-    return { headers: { Referer: this.base, Origin: this.base }, file: stream.url, tracks: stream.subtitles || [] };
-  }
-}
-
-class AnimeverseProvider extends BaseProvider {
-  constructor() {
-    super("Animeverse");
-    this.baseUrl = "https://animeverse.to";
-  }
-
-  async search(query, dub) {
-    const searchUrl = `${this.baseUrl}/search?q=${encodeURIComponent(query)}`;
-    const html = await this._fetchHtml(searchUrl, "a[href*='/watch/']");
-    if (!html) return [];
-
-    const $ = cheerio.load(html);
-    let watchLink = null;
-    let title = query;
-    $('a[href*="/watch/"]').each((_, el) => {
-      if (watchLink) return false;
-      const href = $(el).attr('href');
-      if (!href) return;
-      watchLink = href.startsWith('http') ? href : `${this.baseUrl}${href}`;
-      const text = $(el).text().trim() || $(el).find('img').attr('alt') || '';
-      if (text) title = text;
-    });
-
-    if (!watchLink) return [];
-    return [{ title, url: watchLink, hasSub: true, hasDub: false }];
-  }
-
-  async findEpisodes(seriesUrl) {
-    const html = await this._fetchHtml(seriesUrl);
-    if (!html) return [];
-
-    const $ = cheerio.load(html);
-    const episodes = [];
-
-    $('a[href*="/watch/"]').each((_, el) => {
-      const href = $(el).attr('href');
-      if (!href) return;
-      const match = href.match(/(?:ep(?:isode)?[-_]?)(\d+)/i);
-      if (match) {
-        const epNum = parseInt(match[1], 10);
-        const fullUrl = href.startsWith('http') ? href : `${this.baseUrl}${href}`;
-        episodes.push({
-          dataIds: JSON.stringify({ episodeUrl: fullUrl, number: epNum }),
-          number: epNum,
-          title: $(el).text().trim() || `Episode ${epNum}`
-        });
-      }
-    });
-
-    if (episodes.length === 0) {
-      const iframe = $('iframe').first();
-      if (iframe.length && iframe.attr('src')) {
-        episodes.push({
-          dataIds: JSON.stringify({ embedUrl: iframe.attr('src'), number: 1 }),
-          number: 1,
-          title: 'Episode 1'
-        });
-      }
-    }
-
-    return episodes.sort((a, b) => a.number - b.number);
-  }
-
-  async findAvailableServers(dataIds, audio) {
-    const { episodeUrl, embedUrl } = JSON.parse(dataIds);
-    if (audio !== "sub") return [];
-
-    if (embedUrl) {
-      return [{
-        id: JSON.stringify({ embedUrl, referer: episodeUrl || this.baseUrl }),
-        name: `Animeverse (${audio.toUpperCase()})`
-      }];
-    }
-
-    const html = await this._fetchHtml(episodeUrl);
-    if (!html) return [];
-
-    const $ = cheerio.load(html);
-    const iframe = $('iframe').first();
-    if (!iframe.length || !iframe.attr('src')) return [];
-
-    const src = iframe.attr('src');
-    return [{
-      id: JSON.stringify({ embedUrl: src, referer: episodeUrl }),
-      name: `Animeverse (${audio.toUpperCase()})`
-    }];
-  }
-
-  async extractStreamFromLinkId(linkId) {
-    const { embedUrl, referer } = JSON.parse(linkId);
-    if (!embedUrl) throw new Error("No embed URL found");
-    const finalUrl = embedUrl.startsWith('http') ? embedUrl : `${this.baseUrl}${embedUrl}`;
-    return {
-      headers: { Referer: referer || this.baseUrl, Origin: this.baseUrl },
-      file: finalUrl,
-      tracks: []
-    };
-  }
-
-  async _fetchHtml(url, waitForSelector = null) {
-    try {
-      const res = await robustFetch(url, { headers: { Referer: this.baseUrl, "User-Agent": USER_AGENT } });
-      if (!res.ok) return null;
-      const html = await res.text();
-      if (waitForSelector) {
-        const $ = cheerio.load(html);
-        if ($(waitForSelector).length === 0) return null;
-      }
-      return html;
-    } catch (err) {
-      console.error(`[Animeverse] Fetch error for ${url}:`, err.message);
-      return null;
-    }
-  }
-}
-
-class AniZoneProvider extends BaseProvider {
-  constructor() { super("AniZone"); this.base = "https://anizone.to"; this.headers = { "User-Agent": USER_AGENT, "Referer": this.base + "/", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }; }
-  _extractCardInfo($, el) {
-    const href = $(el).find('a[href*="/anime/"]').first().attr('href');
-    if (!href) return null;
-    const parts = href.split('/');
-    const slug = parts[parts.length - 1] || parts[parts.length - 2];
-    const xData = $(el).attr('x-data') || '';
-    const defaultTitleMatch = xData.match(/window\.getTitle\(this\.anmTitles,\s*'([^']+)'\)/);
-    const defaultTitle = defaultTitleMatch ? defaultTitleMatch[1] : '';
-    const titles = new Set();
-    if (defaultTitle) titles.add(defaultTitle);
-    const jsonMatch = xData.match(/JSON\.parse\('([^']+)'\)/);
-    if (jsonMatch) {
-      try {
-        let jsonStr = jsonMatch[1].replace(/\\\\/g, '\\').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))).replace(/\\'/g, "'");
-        const parsed = JSON.parse(jsonStr);
-        Object.values(parsed).forEach(t => { if (t) titles.add(t); });
-      } catch (e) {}
-    }
-    return { slug, titles: Array.from(titles) };
-  }
-  _normalize(str) { return str.toLowerCase().replace(/[^a-z0-9]/g, '').trim(); }
-  _getSeasonRegexes(season) {
-    if (season === 1) return { mustNot: [/season\s*[2-9]/i, /[\s\-][iI]{2,}/, /\s+[2-9]nd/i, /\s+[2-9]rd/i, /\s+[2-9]th/i, /\s+ii/i, /\s+iii/i, /\s+iv/i, /\s+v/i] };
-    const patterns = [];
-    if (season === 2) patterns.push(/season\s*2/i, /2nd\s*season/i, /[\s\-]ii\b/i, /\b2\b/);
-    else if (season === 3) patterns.push(/season\s*3/i, /3rd\s*season/i, /[\s\-]iii\b/i, /\b3\b/);
-    else if (season === 4) patterns.push(/season\s*4/i, /4th\s*season/i, /[\s\-]iv\b/i, /\b4\b/);
-    else patterns.push(new RegExp(`season\\s*${season}`, 'i'), new RegExp(`\\b${season}\\b`));
-    return { must: patterns };
-  }
-  _matchCard(cards, jikanTitle, baseTitle, season) {
-    const normalizedJikan = this._normalize(jikanTitle);
-    const normalizedJikanNoSub = this._normalize(jikanTitle.split(':')[0]);
-    const normalizedBase = this._normalize(baseTitle);
-    for (const card of cards) {
-      for (const title of card.titles) {
-        const normTitle = this._normalize(title);
-        const normTitleNoSub = this._normalize(title.split(':')[0]);
-        if (normTitle === normalizedJikan || normTitleNoSub === normalizedJikanNoSub) return card.slug;
-      }
-    }
-    const seasonRules = this._getSeasonRegexes(season);
-    for (const card of cards) {
-      let matchesBase = false;
-      for (const title of card.titles) if (this._normalize(title).includes(normalizedBase)) { matchesBase = true; break; }
-      if (!matchesBase) continue;
-      let seasonMatches = false;
-      if (season === 1) {
-        let hasOtherSeason = false;
-        for (const title of card.titles) if (seasonRules.mustNot.some(regex => regex.test(title))) { hasOtherSeason = true; break; }
-        if (!hasOtherSeason) seasonMatches = true;
-      } else {
-        for (const title of card.titles) if (seasonRules.must.some(regex => regex.test(title))) { seasonMatches = true; break; }
-      }
-      if (seasonMatches) return card.slug;
-    }
-    return null;
-  }
-  _matchMovieCard(cards, targetTitle) {
-    const normTarget = this._normalize(targetTitle);
-    for (const card of cards) for (const title of card.titles) if (this._normalize(title) === normTarget) return card.slug;
-    for (const card of cards) for (const title of card.titles) if (this._normalize(title).includes(normTarget) || normTarget.includes(this._normalize(title))) return card.slug;
-    return cards[0]?.slug || null;
-  }
-  async search(query, dub) {
-    const res = await robustFetch(`${this.base}/anime?search=${encodeURIComponent(query)}`, { headers: this.headers });
-    if (!res.ok) return [];
-    const $ = cheerio.load(await res.text());
-    const cards = [];
-    $('[x-data*="anmTitles"]').each((i, el) => { const info = this._extractCardInfo($, el); if (info) cards.push(info); });
-    if (cards.length) return cards.map(card => ({ title: card.titles[0] || card.slug.replace(/-/g, ' '), url: card.slug, hasSub: true, hasDub: true }));
-    const results = [];
-    $('main a').each((i, el) => {
-      const href = $(el).attr('href');
-      if (href && (href.startsWith('https://anizone.to/anime/') || href.startsWith('/anime/'))) {
-        const slug = href.split('/').pop();
-        const title = $(el).find('h2, p, .title').first().text().trim() || slug;
-        results.push({ title, url: slug, hasSub: true, hasDub: true });
-      }
-    });
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const slug = seriesUrl;
-    const res = await robustFetch(`${this.base}/anime/${slug}/1`, { headers: this.headers });
-    if (!res.ok) return [];
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const episodes = [];
-    const epRegex = /<a[^>]*href="([^"]*\/anime\/[^"]+?)"[^>]*>\s*<div[^>]*>\s*<div[^>]*class='[^']*min-w-10[^']*'[^>]*>(\d+)<\/div>\s*<div[^>]*class="[^"]*line-clamp-1[^"]*"[^>]*>([^<]+)<\/div>/g;
-    let match;
-    while ((match = epRegex.exec(html)) !== null) {
-      const [, href, num, title] = match;
-      const episodeId = href.split('/').pop() ?? num;
-      episodes.push({ dataIds: JSON.stringify({ slug, episodeId, url: href }), number: parseInt(num, 10), title: title.trim() });
-    }
-    if (!episodes.length) {
-      $('a[href^="/anime/"]').each((i, el) => {
-        const href = $(el).attr('href');
-        const parts = href.split('/');
-        const epNum = parseInt(parts[parts.length - 1], 10);
-        if (!isNaN(epNum) && epNum > 0) {
-          const epTitle = $(el).find('div[class*="line-clamp"]').text().trim() || `Episode ${epNum}`;
-          episodes.push({ dataIds: JSON.stringify({ slug, episodeId: String(epNum), url: href }), number: epNum, title: epTitle });
-        }
-      });
-    }
-    return episodes.sort((a,b) => a.number - b.number);
-  }
-  async findAvailableServers(dataIds, audio) {
-    const { slug, episodeId, url } = JSON.parse(dataIds);
-    const epUrl = url || `${this.base}/anime/${slug}/${episodeId}`;
-    const res = await robustFetch(epUrl, { headers: this.headers });
-    if (!res.ok) throw new Error("Failed to fetch episode page");
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    let masterUrl = $('media-player').attr('src');
-    if (!masterUrl) { const matches = html.match(/https:\/\/[^"']+\/master\.m3u8/); if (matches) masterUrl = matches[0]; }
-    if (!masterUrl) throw new Error("No m3u8 URL found");
-    const subtitles = [];
-    $('track').each((i, el) => {
-      const src = $(el).attr('src');
-      const kind = $(el).attr('kind');
-      if (src && (kind === 'subtitles' || kind === 'captions' || src.endsWith('.ass') || src.endsWith('.vtt'))) {
-        subtitles.push({ url: src, name: $(el).attr('label') || 'English', language: $(el).attr('srclang') || 'en' });
-      }
-    });
-    let format = "Sub";
-    $('button').each((i, el) => {
-      const text = $(el).text();
-      if (text.includes('Audio:')) {
-        const hasJapanese = text.includes('Japanese');
-        const hasEnglish = text.includes('English');
-        if (hasEnglish && !hasJapanese) format = "Dub";
-        else if (hasEnglish && hasJapanese) format = "Sub & Dub";
-      }
-    });
-    if (format === "Sub") {
-      $('button[wire\\:click^="setVideo"]').each((i, el) => {
-        const btnText = $(el).text();
-        const hasJapanese = btnText.includes('Japanese');
-        const hasEnglish = btnText.includes('English');
-        if (hasEnglish && !hasJapanese) format = "Dub";
-        else if (hasEnglish && hasJapanese) format = "Sub & Dub";
-      });
-    }
-    const serverId = JSON.stringify({ masterUrl, subtitles, audio, format, name: "AniZone", title: `${slug} - Episode ${episodeId} [${format}]`, quality: "Multi", headers: this.headers });
-    return [{ id: serverId, name: `AniZone (${audio.toUpperCase()})` }];
-  }
-  async extractStreamFromLinkId(linkId) {
-    const { masterUrl, subtitles, headers } = JSON.parse(linkId);
-    const tracks = subtitles.map(sub => ({ file: sub.url, label: sub.name, kind: "subtitles", default: false }));
-    return { headers: headers || this.headers, file: masterUrl, tracks };
-  }
-}
-
-function absUrl(url, base) {
-  if (url.search(/^\w+:\/\//) === 0) return url;
-  if (url.startsWith('/')) return base.slice(0, base.lastIndexOf('/')) + url;
-  return base.slice(0, base.lastIndexOf('/') + 1) + url;
-}
-
-function fixMojibake(str) {
-  let out = "";
-  for (let i = 0; i < str.length; i++) {
-    out += String.fromCharCode(str.charCodeAt(i) & 0xFF);
-  }
-  return decodeURIComponent(escape(out));
-}
-
-const m3u8RegexCache = {
-  media: /^#EXT-X-MEDIA:(.*)$/gm,
-  stream: /^#EXT-X-STREAM-INF:(.*)$/gm,
-  streamUrl: /\n([^\n#][^\n]*)/,
-  type: /TYPE=([\w-]*)/,
-  groupId: /GROUP-ID="([^"]*)"/,
-  language: /LANGUAGE="([^"]*)"/,
-  name: /NAME="([^"]*)"/,
-  uri: /URI="([^"]*)"/,
-  default: /DEFAULT=YES/,
-  resolution: /RESOLUTION=([\dx]+)/,
-  bandwidth: /BANDWIDTH=(\d+)/,
-  avgBandwidth: /AVERAGE-BANDWIDTH=(\d+)/,
-  video: /VIDEO="([^"]*)"/,
-  audio: /AUDIO="([^"]*)"/,
-  subtitles: /SUBTITLES="([^"]*)"/,
-  captions: /CLOSED-CAPTIONS="([^"]*)"/,
-};
-
-function extractAttr(text, regex) {
-  const match = regex.exec(text);
-  return match ? match[1] : null;
-}
-
-async function m3u8Extractor(url, text, headers, incSubs = null) {
-  const videos = {}, audios = {}, subtitles = {}, captions = {};
-  const streams = [];
-
-  let mediaMatch;
-  m3u8RegexCache.media.lastIndex = 0;
-  while ((mediaMatch = m3u8RegexCache.media.exec(text)) !== null) {
-    const info = mediaMatch[1];
-    const type = extractAttr(info, m3u8RegexCache.type);
-    if (!type) continue;
-
-    const group = extractAttr(info, m3u8RegexCache.groupId);
-    if (!group) continue;
-
-    const medium = {
-      lang: extractAttr(info, m3u8RegexCache.language),
-      name: extractAttr(info, m3u8RegexCache.name),
-      uri: extractAttr(info, m3u8RegexCache.uri),
-      default: m3u8RegexCache.default.test(info),
-      autoselect: /AUTOSELECT=YES/.test(info),
-    };
-
-    const typeDict = { 'VIDEO': videos, 'AUDIO': audios, 'SUBTITLES': subtitles, 'CLOSED-CAPTIONS': captions }[type];
-    if (typeDict) {
-      if (!typeDict[group]) typeDict[group] = [];
-      typeDict[group].push(medium);
-    }
-  }
-
-  let streamMatch;
-  m3u8RegexCache.stream.lastIndex = 0;
-  while ((streamMatch = m3u8RegexCache.stream.exec(text)) !== null) {
-    const info = streamMatch[1];
-    const nextNewline = text.indexOf('\n', streamMatch.index + streamMatch[0].length);
-    const streamUrl = nextNewline > -1 ? text.substring(streamMatch.index + streamMatch[0].length + 1, nextNewline).trim() : '';
-
-    if (!streamUrl || streamUrl.startsWith('#')) continue;
-
-    const videoGroup = extractAttr(info, m3u8RegexCache.video);
-    const audioGroup = extractAttr(info, m3u8RegexCache.audio);
-    const subGroup = extractAttr(info, m3u8RegexCache.subtitles);
-
-    let quality = 'Auto';
-    const resMatch = extractAttr(info, m3u8RegexCache.resolution);
-    if (resMatch) {
-      const heightMatch = resMatch.match(/x(\d+)/);
-      quality = heightMatch ? heightMatch[1] + 'p' : quality;
-    } else {
-      const avgBw = extractAttr(info, m3u8RegexCache.avgBandwidth);
-      const bw = extractAttr(info, m3u8RegexCache.bandwidth);
-      const bandwidth = parseInt(avgBw || bw || 0);
-      if (bandwidth > 0) quality = (bandwidth / 1000000).toFixed(1) + 'Mb/s';
-    }
-
-    const mediaList = videos[videoGroup] || subtitles[subGroup] || [];
-    const audioList = audios[audioGroup] || [];
-    const subs = mediaList.length > 0 ? mediaList.map((s) => ({
-      file: absUrl(s.uri, url),
-      label: s.name || 'Unknown'
-    })) : incSubs;
-    const auds = audioList.length > 0 ? audioList.map((a) => ({
-      file: absUrl(a.uri, url),
-      label: a.name || 'Unknown'
-    })) : null;
-
-    streams.push({
-      url: absUrl(streamUrl, url),
-      quality,
-      originalUrl: absUrl(streamUrl, url),
-      headers,
-      subtitles: subs,
-      audios: auds
-    });
-  }
-
-  return streams.length > 0 ? streams : [{
-    url,
-    quality: 'Auto',
-    originalUrl: url,
-    headers,
-    subtitles: incSubs,
-    audios: null
-  }];
-}
-// ================================ WcoStreamProvider ================================
-class WcoStreamProvider extends BaseProvider {
-  constructor() {
-    super("WcoStream");
-    this.baseUrl = "https://www.wcostream.tv";
-    this.userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0";
-  }
-
-  async _fetchHtml(url, options = {}) {
-    const res = await robustFetch(url, {
-      headers: { "User-Agent": this.userAgent, ...options.headers },
-      ...options,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  }
-
-  async _makeRequest(url, method = "GET", data = null, headers = {}, useCache = true) {
-    const opts = {
-      method,
-      headers: {
-        "User-Agent": this.userAgent,
-        Accept: "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        ...headers,
-      },
-    };
-    if (method === "POST" && data) {
-      opts.body = data;
-      if (!opts.headers["Content-Type"]) {
-        opts.headers["Content-Type"] = "application/x-www-form-urlencoded";
-      }
-    }
-    try {
-      const res = await robustFetch(url, opts);
-      if (!res.ok) return null;
-      return await res.text();
-    } catch (err) {
-      console.error(`[WcoStream] Request failed: ${url}`, err.message);
-      return null;
-    }
-  }
-
-  _unescapeHtmlUrl(url) {
-    return (url || "").replace(/&amp;/g, "&").replace(/&#38;/g, "&");
-  }
-
-  _ensureFullUrl(baseUrl, url) {
-    url = this._unescapeHtmlUrl(url);
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
-    if (url.startsWith("//")) return "https:" + url;
-    return new URL(url, baseUrl).href;
-  }
-
-  _embedApiOrigin(embedUrl) {
-    try {
-      const parsed = new URL(embedUrl);
-      return `${parsed.protocol}//${parsed.hostname}/`;
-    } catch {
-      return "https://embed.wcostream.com/";
-    }
-  }
-
-  async _findEmbedUrl(pageContent, episodeUrl) {
-    let match = pageContent.match(/<iframe id="[^"]*" class="vjs_iframe"[^>]+src="([^"]+)"/i);
-    if (match) return [this._ensureFullUrl(episodeUrl, match[1]), true];
-
-    match = pageContent.match(/<iframe\s+id="[^"]*uploads\d+"\s+src="([^"]+)"/i);
-    if (match) return [this._ensureFullUrl(episodeUrl, match[1]), false];
-
-    match = pageContent.match(/<iframe[^>]+id="[^"]*-js-\d+"[^>]+src="([^"]+)"/i);
-    if (match) return [this._ensureFullUrl(episodeUrl, match[1]), false];
-
-    match = pageContent.match(/<iframe[^>]+src="((?:https?:)?\/\/embed\.wcostream\.com\/inc\/embed\/[^"]+)"/i);
-    if (match) return [this._ensureFullUrl(episodeUrl, match[1]), false];
-
-    const idx = pageContent.indexOf("onclick=\"myFunction") !== -1 ? pageContent.indexOf("onclick=\"myFunction") : pageContent.indexOf("class=\"episode-descp\"");
-    if (idx > 0) {
-      const srcMatch = pageContent.slice(idx).match(/src="([^"]+)"/);
-      if (srcMatch) return [this._ensureFullUrl(episodeUrl, srcMatch[1]), false];
-    }
-
-    const iframeRegex = /<iframe[^>]+src="([^"]+)"/gi;
-    const skipHosts = ["ads", "analytics", "disqus", "facebook", "twitter", "check-login"];
-    let iframeMatch;
-    while ((iframeMatch = iframeRegex.exec(pageContent)) !== null) {
-      const url = iframeMatch[1];
-      if (skipHosts.some(skip => url.toLowerCase().includes(skip))) continue;
-      return [this._ensureFullUrl(episodeUrl, url), false];
-    }
-    return [null, false];
-  }
-
-  _normalizeEmbedPlayerUrl(embedUrl) {
-    embedUrl = this._unescapeHtmlUrl(embedUrl);
-    if (embedUrl.includes("inc/embed/index.php")) {
-      embedUrl = embedUrl.replace("inc/embed/index.php", "inc/embed/video-js.php");
-    }
-    return embedUrl;
-  }
-
-  async _fetchPlayerHtml(embedUrl, episodeUrl) {
-    const playerUrl = this._normalizeEmbedPlayerUrl(embedUrl);
-    const headers = { Referer: episodeUrl, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" };
-    const playerHtml = await this._makeRequest(playerUrl, "GET", null, headers, false);
-    return [playerHtml, playerUrl];
-  }
-
-  _buildDirectSource(title, versionType, lang, videoUrl, referer, qualityNum, infoLabel) {
-    const videoHeaders = { "User-Agent": this.userAgent, Referer: referer, Accept: "*/*" };
-    return {
-      release_title: `${title} - ${versionType}`,
-      hash: `${videoUrl}|${new URLSearchParams(videoHeaders).toString()}`,
-      type: "direct",
-      quality: qualityNum,
-      debrid_provider: "",
-      provider: "wcostream",
-      size: "NA",
-      seeders: 0,
-      byte_size: 0,
-      info: [infoLabel],
-      lang: lang,
-      channel: 3,
-      sub: 1,
-    };
-  }
-
-async _resolveApiUrl(playerHtml, embedUrl) {
-    const apiOrigin = this._embedApiOrigin(embedUrl);
-    let match = playerHtml.match(/\$\.getJSON\("([^"]+)"\)/);
-    if (!match) match = playerHtml.match(/getRedirectedUrl\("([^"]+)"\)/);
-    if (match) {
-      let path = match[1];
-      if (!path.startsWith("http")) {
-        path = path.startsWith("/") ? path.slice(1) : path;
-        path = new URL(path, apiOrigin).href;
-      }
-      if (!path.includes("json")) path += (path.includes("?") ? "&json" : "?json");
-      return path;
-    }
-    // Fix: Use a regex that matches the string pattern without problematic escapes
-    const getvidlinkRegex = /"(\/inc\/embed\/getvidlink[^"]+)"/;
-    match = playerHtml.match(getvidlinkRegex);
-    if (match) {
-      let path = match[1];
-      if (!path.startsWith("http")) path = new URL(path, apiOrigin).href;
-      return path;
-    }
+    } catch(e) { debugLog(`Metadata fetch failed: ${e.message}`); }
     return null;
 }
 
-  async _extractApiSourcesFromHtml(playerHtml, embedUrl, title, versionType, lang) {
-    const sources = [];
-    const apiUrl = await this._resolveApiUrl(playerHtml, embedUrl);
-    if (!apiUrl) return sources;
-
-    console.log(`[WcoStream] API URL: ${apiUrl}`);
-    const apiResp = await this._makeRequest(apiUrl, "GET", null, { Accept: "*/*", Referer: embedUrl, "X-Requested-With": "XMLHttpRequest" }, false);
-    if (!apiResp) return sources;
-
-    let jsonData;
-    try { jsonData = JSON.parse(apiResp); } catch { return sources; }
-
-    const tokenSd = jsonData.enc || "";
-    const tokenHd = jsonData.hd || "";
-    const tokenFhd = jsonData.fhd || "";
-    let serverBase = jsonData.server || "";
-    if (serverBase) serverBase = serverBase.replace(/\/+$/, "") + "/getvid?evid=";
-
-    const qualityMap = [
-      ["SD", tokenSd, 1],
-      ["HD", tokenHd, 2],
-      ["FHD", tokenFhd, 3],
-    ];
-    for (const [label, token, quality] of qualityMap) {
-      if (serverBase && token) {
-        const videoUrl = serverBase + token;
-        sources.push(this._buildDirectSource(title, versionType, lang, videoUrl, embedUrl, quality, `API ${label} ${versionType}`));
-      }
-    }
-
-    const cdnBackup = jsonData.cdn || "";
-    if (cdnBackup && (tokenSd || tokenHd || tokenFhd)) {
-      const backupToken = tokenFhd || tokenHd || tokenSd;
-      const backupUrl = cdnBackup.replace(/\/+$/, "") + "/getvid?evid=" + backupToken;
-      sources.push(this._buildDirectSource(title, versionType, lang, backupUrl, embedUrl, 2, `CDN Backup ${versionType}`));
-    }
-    return sources;
-  }
-
-  async _extractM3u8SourcesFromHtml(playerHtml, embedUrl, title, versionType, lang) {
-    const sources = [];
-    const sourceMatch = playerHtml.match(/<source\s+src="([^"]+)"/i);
-    if (sourceMatch) {
-      sources.push(this._buildDirectSource(title, versionType, lang, sourceMatch[1], embedUrl, 3, `M3U8 ${versionType}`));
-      return sources;
-    }
-    const redirectMatch = playerHtml.match(/getRedirectedUrl\("([^"]+)"/);
-    if (redirectMatch) {
-      sources.push(this._buildDirectSource(title, versionType, lang, redirectMatch[1], embedUrl, 3, `M3U8 ${versionType}`));
-    }
-    return sources;
-  }
-
-  async _extractJwplayerSourcesFromHtml(playerHtml, embedUrl, title, versionType, lang) {
-    const sources = [];
-    const sourcesBlock = playerHtml.match(/sources:\s*\[(.*?)\]/s);
-    if (!sourcesBlock) return sources;
-    const pattern = /\{\s*file:\s*"([^"]+)"(?:,\s*label:\s*"([^"]+)")?/g;
-    let match;
-    while ((match = pattern.exec(sourcesBlock[1])) !== null) {
-      const label = match[2] || "Stream";
-      const videoUrl = match[1];
-      let quality = 1;
-      if (label.includes("1080")) quality = 3;
-      else if (label.includes("720")) quality = 2;
-      sources.push(this._buildDirectSource(title, versionType, lang, videoUrl, embedUrl, quality, `${label} ${versionType}`));
-    }
-    return sources;
-  }
-
-  async _extractStreamsFromPlayerHtml(playerHtml, embedUrl, title, versionType, lang, isM3u8Player = false) {
-    if (playerHtml && playerHtml.includes("high volume of requests")) {
-      console.log("[WcoStream] Player blocked due to high volume");
-      return [];
-    }
-    let sources = await this._extractApiSourcesFromHtml(playerHtml, embedUrl, title, versionType, lang);
-    if (sources.length) return sources;
-    if (isM3u8Player) {
-      sources = await this._extractM3u8SourcesFromHtml(playerHtml, embedUrl, title, versionType, lang);
-      if (sources.length) return sources;
-    }
-    sources = await this._extractM3u8SourcesFromHtml(playerHtml, embedUrl, title, versionType, lang);
-    if (sources.length) return sources;
-    return this._extractJwplayerSourcesFromHtml(playerHtml, embedUrl, title, versionType, lang);
-  }
-
-  async _premiumWorkaroundCheck(pageContent, episodeUrl) {
-    const playlistMatch = pageContent.match(/href="([^"]*playlist-cat-jw[^"]*)"/);
-    if (!playlistMatch) return null;
-    let playlistUrl = playlistMatch[1];
-    if (!playlistUrl.startsWith("http")) playlistUrl = this._ensureFullUrl(episodeUrl, playlistUrl);
-    const playlistResp = await this._makeRequest(playlistUrl);
-    if (!playlistResp) return null;
-    const rssUrlMatch = playlistResp.match(/<link[^>]*>([^<]+)<\/link>/);
-    if (rssUrlMatch) {
-      const videoUrl = rssUrlMatch[1].trim();
-      if (videoUrl.startsWith("http")) return videoUrl;
-    }
-    return null;
-  }
-
-  async _extractAdvancedSources(episodeUrl, pageContent, versionType, lang, title) {
-    const sources = [];
-    const premiumUrl = await this._premiumWorkaroundCheck(pageContent, episodeUrl);
-    if (premiumUrl) {
-      sources.push(this._buildDirectSource(title, versionType, lang, premiumUrl, episodeUrl, 3, `Premium ${versionType}`));
-    }
-    const [embedUrl, isM3u8Player] = await this._findEmbedUrl(pageContent, episodeUrl);
-    if (!embedUrl) {
-      console.log("[WcoStream] No embed URL found");
-      return sources;
-    }
-    const [playerHtml, resolvedEmbedUrl] = await this._fetchPlayerHtml(embedUrl, episodeUrl);
-    if (!playerHtml) return sources;
-    const streamSources = await this._extractStreamsFromPlayerHtml(playerHtml, resolvedEmbedUrl, title, versionType, lang, isM3u8Player);
-    sources.push(...streamSources);
-    return sources;
-  }
-
-  async search(query, dub) {
-    const formBody = new URLSearchParams();
-    formBody.append("catara", query);
-    formBody.append("konuara", "series");
-    const resp = await this._makeRequest(`${this.baseUrl}/search`, "POST", formBody.toString());
-    if (!resp) return [];
-    const $ = cheerio.load(resp);
-    const results = [];
-    const searchSection = resp.match(/aramamotoru([\s\S]*?)cizgiyazisi/);
-    if (searchSection) {
-      const section = searchSection[1];
-      const linkRegex = /<a href="([^"]+)[^>]*>([^<]+)<\/a>/g;
-      let m;
-      while ((m = linkRegex.exec(section)) !== null) {
-        const href = m[1];
-        const title = m[2].trim();
-        if (href && title) {
-          const url = href.startsWith("/") ? `${this.baseUrl}${href}` : href;
-          results.push({ title, url, hasSub: true, hasDub: true });
-        }
-      }
-    } else {
-      $(".cerceve").each((_, el) => {
-        const titleDiv = $(el).find(".aramadabaslik a");
-        const href = titleDiv.attr("href");
-        const title = titleDiv.attr("title") || titleDiv.text().trim();
-        if (href && title) {
-          const fullUrl = href.startsWith("/") ? `${this.baseUrl}${href}` : href;
-          results.push({ title, url: fullUrl, hasSub: true, hasDub: true });
-        }
-      });
-    }
-    return results;
-  }
-
-  async findEpisodes(seriesUrl) {
-    const html = await this._fetchHtml(seriesUrl);
-    const $ = cheerio.load(html);
-    const episodes = [];
-    $("a[href*='episode']").each((_, el) => {
-      const href = $(el).attr("href");
-      const title = $(el).attr("title") || $(el).text().trim();
-      if (!href || !title) return;
-      const fullUrl = href.startsWith("http") ? href : `${this.baseUrl}${href}`;
-      const epNumMatch = title.match(/Episode\s+(\d+(?:\.\d+)?)/i);
-      const epNum = epNumMatch ? parseFloat(epNumMatch[1]) : 0;
-      const seasonMatch = title.match(/Season\s+(\d+)/i);
-      const season = seasonMatch ? parseInt(seasonMatch[1]) : null;
-      if (epNum === 0) return;
-      episodes.push({
-        dataIds: JSON.stringify({
-          episodeUrl: fullUrl,
-          episodeNumber: epNum,
-          season,
-          title,
-        }),
-        number: epNum,
-        title,
-        season,
-      });
-    });
-    episodes.sort((a, b) => {
-      if (a.season !== b.season) return (a.season || 0) - (b.season || 0);
-      return a.number - b.number;
-    });
-    return episodes;
-  }
-
-  async findAvailableServers(dataIds, audio) {
-    const { episodeUrl, season, episodeNumber, title } = JSON.parse(dataIds);
-    const versionType = audio === "dub" ? "DUB" : "SUB";
-    const lang = audio === "dub" ? 3 : 2;
-    const pageContent = await this._fetchHtml(episodeUrl);
-    if (!pageContent) return [];
-    const sources = await this._extractAdvancedSources(episodeUrl, pageContent, versionType, lang, title);
-    return sources.map((src, idx) => ({
-      id: JSON.stringify({
-        url: src.hash.split("|")[0],
-        headers: Object.fromEntries(new URLSearchParams(src.hash.split("|")[1] || "")),
-        quality: src.quality,
-        info: src.info,
-      }),
-      name: `WcoStream - ${src.info[0]}`,
-    }));
-  }
-
-  async extractStreamFromLinkId(linkId) {
-    const { url, headers } = JSON.parse(linkId);
-    if (!url) throw new Error("No stream URL");
-    return {
-      headers: headers || { Referer: this.baseUrl },
-      file: url,
-      tracks: [],
-    };
-  }
-}
-class KickAssAnimeProvider extends BaseProvider {
-  constructor() {
-    super("KickAssAnime");
-    this.baseUrl = "https://kaa.rs/";
-    this.apiUrl = "https://kaa.lt/api";
-  }
-
-  _getHeaders(referer = this.baseUrl) {
-    return {
-      "User-Agent": USER_AGENT,
-      "Referer": referer,
-      "Origin": this.baseUrl,
-      "Accept": "application/json, text/plain, */*"
-    };
-  }
-
-  async _fetchApi(path, options = {}) {
-    const url = `${this.apiUrl}${path}`;
-    const res = await robustFetch(url, {
-      headers: this._getHeaders(),
-      ...options
-    });
-    if (!res.ok) throw new Error(`KickAssAnime API error: ${res.status}`);
-    return res.json();
-  }
-
-  async search(query, dub) {
-    const body = {
-      query: query,
-      page: 1,
-      filters: ""
-    };
-    const data = await robustFetch(`${this.apiUrl}/fsearch`, {
-      method: "POST",
-      headers: { ...this._getHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    if (!data.ok) return [];
-    const json = await data.json();
-    const results = json.result || [];
-    return results.map(item => ({
-      title: item.title_en || item.title || item.title_original || "Unknown",
-      url: item.slug,
-      hasSub: true,
-      hasDub: true
-    }));
-  }
-
-  async findEpisodes(seriesUrl) {
-    const slug = seriesUrl;
-    const data = await this._fetchApi(`/show/${slug}/episodes?lang=en-US`);
-    const episodesData = data.result || [];
-    episodesData.sort((a, b) => a.episode_number - b.episode_number);
-    const episodes = [];
-    for (const ep of episodesData) {
-      const episodeUrl = `${this.baseUrl}/${slug}/ep-${ep.episode_string}-${ep.slug}`;
-      episodes.push({
-        dataIds: JSON.stringify({
-          episodeUrl,
-          episodeNumber: ep.episode_number,
-          episodeString: ep.episode_string,
-          slug: ep.slug,
-          animeSlug: slug
-        }),
-        number: ep.episode_number,
-        title: ep.episode_title || `Episode ${ep.episode_string}`
-      });
-    }
-    return episodes;
-  }
-
-  async findAvailableServers(dataIds, audio) {
-    const { animeSlug, episodeString, slug } = JSON.parse(dataIds);
-    const epData = await this._fetchApi(`/show/${animeSlug}/episode/ep-${episodeString}-${slug}`);
-    const servers = epData.servers || [];
-    const availableServers = [];
-    for (const server of servers) {
-      if (server.name === "CatStream" || server.name === "VidStreaming") {
-        availableServers.push({
-          id: JSON.stringify({
-            serverName: server.name,
-            serverSrc: server.src,
-            animeSlug,
-            episodeString,
-            slug
-          }),
-          name: `KickAssAnime - ${server.name}`
-        });
-      }
-    }
-    return availableServers;
-  }
-
-  async extractStreamFromLinkId(linkId) {
-    const { serverName, serverSrc } = JSON.parse(linkId);
-    const serverRes = await robustFetch(serverSrc, { headers: this._getHeaders(this.baseUrl) });
-    const serverHtml = await serverRes.text();
-    const $ = cheerio.load(serverHtml);
-    const astroIsland = $('astro-island').first();
-    if (!astroIsland.length) throw new Error("No astro-island found");
-    const propsAttr = astroIsland.attr('props');
-    if (!propsAttr) throw new Error("No props attribute");
-    const props = JSON.parse(propsAttr);
-    
-    let subtitles = [];
-    if (props.subtitles && props.subtitles[1]) {
-      for (const sub of props.subtitles[1]) {
-        subtitles.push({
-          label: fixMojibake(sub[1].name[1]),
-          file: sub[1].src[1]
-        });
-      }
-    }
-
-    let masterUrl = null;
-    let originHeader = "https://krussdomi.com";
-    
-    if (serverName === "CatStream") {
-      let idUrl = props.manifest[1] || props.thumbnails[1];
-      if (!idUrl) throw new Error("No manifest/thumbnail URL found");
-      const idMatch = idUrl.match(/\/([a-f0-9]+)\//);
-      const id = idMatch ? idMatch[1] : null;
-      if (!id) throw new Error("Could not extract id from URL");
-      masterUrl = `https://bl.krussdomi.com/playlist/${id}/master.m3u8`;
-    } else if (serverName === "VidStreaming") {
-      const urlParams = new URLSearchParams(serverSrc.split('?')[1]);
-      const id = urlParams.get('id');
-      if (!id) throw new Error("No id query param");
-      masterUrl = `https://hls.krussdomi.com/manifest/${id}/master.m3u8`;
-    } else {
-      throw new Error(`Unknown server: ${serverName}`);
-    }
-
-    const masterRes = await robustFetch(masterUrl, {
-      headers: { ...this._getHeaders(), "Origin": originHeader }
-    });
-    if (!masterRes.ok) throw new Error(`Failed to fetch master.m3u8: ${masterRes.status}`);
-    const masterText = await masterRes.text();
-    
-    const streams = await m3u8Extractor(masterUrl, masterText, { "Origin": originHeader }, subtitles);
-    if (!streams.length) throw new Error("No streams found");
-    
-    const bestStream = streams.reduce((best, curr) => {
-      const currRes = parseInt(curr.quality) || 0;
-      const bestRes = parseInt(best.quality) || 0;
-      return currRes > bestRes ? curr : best;
-    }, streams[0]);
-    
-    const tracks = (bestStream.subtitles || []).map(sub => ({
-      file: sub.file,
-      label: sub.label,
-      kind: "subtitles",
-      default: false
-    }));
-    
-    return {
-      headers: { Referer: originHeader, Origin: originHeader },
-      file: bestStream.url,
-      tracks: tracks
-    };
-  }
-}
-
-class NyanimeProvider extends BaseProvider {
-  constructor() { super("Nyanime"); this.base = "https://www.nyanime.qzz.io"; this.userAgent = USER_AGENT; this._animeInfoCache = new Map(); }
-  async _fetchAnimeInfo(id) {
-    if (this._animeInfoCache.has(id)) return this._animeInfoCache.get(id);
+async function fetchAnilistEpisodes(anilistId) {
     try {
-      const res = await robustFetch(`${this.base}/api/aniwatch?action=info&id=${encodeURIComponent(id)}`, { headers: { "User-Agent": this.userAgent } });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const info = data?.data || null;
-      if (info) this._animeInfoCache.set(id, info);
-      return info;
-    } catch { return null; }
-  }
-  async search(query, dub) {
-    const res = await robustFetch(`${this.base}/api/aniwatch?action=search&q=${encodeURIComponent(query)}`, { headers: { "User-Agent": this.userAgent } });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const animes = data?.data?.animes || [];
-    let results = animes.map(a => ({ title: a.name || a.title || "Unknown", url: a.id, hasSub: (a.episodes?.sub || 0) > 0, hasDub: (a.episodes?.dub || 0) > 0 }));
-    if (dub) results = results.filter(r => r.hasDub);
-    return results;
-  }
-  async findEpisodes(seriesUrl) {
-    const animeInfo = await this._fetchAnimeInfo(seriesUrl);
-    if (!animeInfo) return [];
-    const episodesSub = animeInfo?.episodes?.sub || [];
-    const episodesDub = animeInfo?.episodes?.dub || [];
-    const allEpisodes = [...episodesSub];
-    for (const ep of episodesDub) if (!allEpisodes.some(e => e.number === ep.number)) allEpisodes.push(ep);
-    allEpisodes.sort((a,b) => (a.number||0)-(b.number||0));
-    return allEpisodes.map(ep => ({ dataIds: JSON.stringify({ episodeId: ep.episodeId, number: ep.number, title: ep.title, id: seriesUrl, animeTitle: animeInfo.name, animeJName: animeInfo.jname || animeInfo.name, totalEpisodes: Math.max(episodesSub.length, episodesDub.length), anilistId: seriesUrl.replace('anilist::','') }), number: ep.number, title: ep.title || `Episode ${ep.number}`, hasSub: episodesSub.some(e=>e.number===ep.number), hasDub: episodesDub.some(e=>e.number===ep.number) }));
-  }
-  async findAvailableServers(dataIds, audio) {
-    const parsed = JSON.parse(dataIds);
-    if (!parsed.episodeId) return [];
-    return [{ id: JSON.stringify({ episodeId: parsed.episodeId, audio, animeTitle: parsed.animeTitle, animeJName: parsed.animeJName, episodeNo: parsed.number, totalEpisodes: parsed.totalEpisodes, anilistId: parsed.anilistId, id: parsed.id }), name: `Nyanime (${audio.toUpperCase()})` }];
-  }
-  async extractStreamFromLinkId(linkId) {
-    const parsed = JSON.parse(linkId);
-    const { episodeId, audio, animeTitle, animeJName, episodeNo, totalEpisodes, anilistId } = parsed;
-    let url = `${this.base}/api/aniwatch?action=sources&episodeId=${encodeURIComponent(episodeId)}&category=${audio}&audio=${audio}`;
-    if (animeTitle) url += `&title=${encodeURIComponent(animeTitle)}`;
-    if (animeJName) url += `&title_ro=${encodeURIComponent(animeJName)}`;
-    if (episodeNo) url += `&episodeNo=${episodeNo}`;
-    if (totalEpisodes) url += `&totalEpisodes=${totalEpisodes}`;
-    if (anilistId) url += `&anilistId=${anilistId}`;
-    const res = await robustFetch(url, { headers: { "User-Agent": this.userAgent } });
-    if (!res.ok) throw new Error(`API returned ${res.status}`);
-    const data = await res.json();
-    const sources = data?.data?.sources || [];
-    const headers = data?.data?.headers || {};
-    let bestSource = sources.find(s => s.url && s.url.includes('.m3u8')) || sources[0];
-    if (!bestSource) throw new Error("No stream URL");
-    return { headers: headers || { Referer: this.base, Origin: this.base }, file: bestSource.url, tracks: [] };
-  }
-}
+        const query = `
+            query ($id: Int, $page: Int) {
+                Media(id: $id, type: ANIME) {
+                    id
+                    title { romaji english native }
+                    season seasonYear episodes status
+                    airingSchedule(page: $page, perPage: 50) {
+                        pageInfo { hasNextPage currentPage }
+                        edges {
+                            node {
+                                episode airingAt
+                            }
+                        }
+                    }
+                }
+            }
+        `;
 
-// --- P.A.C.K.E.R. unpacker (used by AnifyProvider's FileMoon embeds) ---
-class Unbaser {
-  constructor(base) {
-    this.ALPHABET = {
-      62: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-      95: "' !\"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~'",
-    };
-    this.dictionary = {};
-    this.base = base;
-    if (36 < base && base < 62) this.ALPHABET[base] = this.ALPHABET[base] || this.ALPHABET[62].substr(0, base);
-    if (2 <= base && base <= 36) {
-      this.unbase = (value) => parseInt(value, base);
-    } else {
-      try { [...this.ALPHABET[base]].forEach((cipher, index) => { this.dictionary[cipher] = index; }); }
-      catch (er) { throw Error("Unsupported base encoding."); }
-      this.unbase = this._dictunbaser;
-    }
-  }
-  _dictunbaser(value) {
-    let ret = 0;
-    [...value].reverse().forEach((cipher, index) => { ret += (Math.pow(this.base, index)) * this.dictionary[cipher]; });
-    return ret;
-  }
-}
-function unpack(source) {
-  let { payload, symtab, radix, count } = _filterargs(source);
-  if (count != symtab.length) throw Error("Malformed p.a.c.k.e.r. symtab.");
-  let unbase;
-  try { unbase = new Unbaser(radix); } catch (e) { throw Error("Unknown p.a.c.k.e.r. encoding."); }
-  function lookup(match) {
-    const word = match;
-    let word2;
-    if (radix == 1) word2 = symtab[parseInt(word)];
-    else word2 = symtab[unbase.unbase(word)];
-    return word2 || word;
-  }
-  source = payload.replace(/\b\w+\b/g, lookup);
-  return _replacestrings(source);
-  function _filterargs(source) {
-    const juicers = [
-      /}\('(.*)', *(\d+|\[\]), *(\d+), *'(.*)'\.split\('\|'\), *(\d+), *(.*)\)\)/,
-      /}\('(.*)', *(\d+|\[\]), *(\d+), *'(.*)'\.split\('\|'\)/,
-    ];
-    for (const juicer of juicers) {
-      const args = juicer.exec(source);
-      if (args) {
-        let a = args;
-        try {
-          return { payload: a[1], symtab: a[4].split("|"), radix: parseInt(a[2]), count: parseInt(a[3]) };
-        } catch (ValueError) { throw Error("Corrupted p.a.c.k.e.r. data."); }
-      }
-    }
-    throw Error("Could not make sense of p.a.c.k.e.r data (unexpected code structure)");
-  }
-  function _replacestrings(source) { return source; }
-}
+        let allEpisodes = {};
+        let page = 1;
+        let hasNextPage = true;
 
-class AnifyProvider extends BaseProvider {
-  constructor() {
-    super("Anify");
-    this.base = "https://anify.to";
-    this.ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
-  }
+        while (hasNextPage && page <= 5) {
+            const response = await axios.post('https://graphql.anilist.co',
+                { query, variables: { id: anilistId, page } },
+                { timeout: 5000 }
+            );
+            const media = response.data.data?.Media;
+            if (!media) break;
 
-  _abs(u) {
-    if (!u) return "";
-    if (/^https?:\/\//i.test(u)) return u;
-    return this.base + (u.startsWith("/") ? u : "/" + u);
-  }
+            if (media.airingSchedule?.edges) {
+                media.airingSchedule.edges.forEach(edge => {
+                    if (edge.node.episode) {
+                        allEpisodes[edge.node.episode] = {
+                            episode: edge.node.episode,
+                            airingAt: edge.node.airingAt
+                        };
+                    }
+                });
+            }
 
-  async search(query, dub) {
-    if (dub) return []; // Anify embeds aren't audio-tagged; treat as sub-only.
-    const res = await robustFetch(`${this.base}/search-ajax`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": this.ua, Referer: this.base },
-      body: `query=${encodeURIComponent(query)}`,
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const results = [];
-    const seen = new Set();
-    $('a[href^="/anime/"]').each((_, a) => {
-      const href = $(a).attr("href");
-      if (!href || seen.has(href)) return;
-      let title = $(a).find(".animename").first().text().trim();
-      if (!title) title = $(a).closest("div,li,article").find(".animename").first().text().trim();
-      if (!title) title = ($(a).find("img").attr("alt") || "").trim();
-      if (!title) return;
-      seen.add(href);
-      results.push({ title, url: this.base + href, image: this._abs($(a).find("img").attr("src")), hasSub: true, hasDub: false });
-    });
-    // Fallback to the reference's raw-HTML regex if the card markup differs.
-    if (!results.length) {
-      const re = /<a href="([^"]+)">\s*<img src="([^"]+)"[^>]*>\s*<\/a>[\s\S]+?<span class="animename[^"]*"[^>]*>([^<]+)<\/span>/g;
-      let m;
-      while ((m = re.exec(html)) !== null) {
-        results.push({ title: m[3].trim(), url: this.base + m[1].trim(), image: this._abs(m[2].trim()), hasSub: true, hasDub: false });
-      }
-    }
-    return results;
-  }
-
-  async findEpisodes(seriesUrl) {
-    const res = await robustFetch(seriesUrl, { headers: { "User-Agent": this.ua, Referer: this.base } });
-    if (!res.ok) return [];
-    const html = await res.text();
-    const episodes = [];
-    const seen = new Set();
-    // Numbered episodes.
-    const epRe = /<a href="(\/watch\/[^"]+)">[\s\S]*?<span class="animename">Episode (\d+)<\/span>/g;
-    let m;
-    while ((m = epRe.exec(html)) !== null) {
-      const href = this.base + m[1].trim();
-      if (seen.has(href)) continue;
-      seen.add(href);
-      episodes.push({ dataIds: href, number: parseInt(m[2], 10), title: `Episode ${m[2]}` });
-    }
-    // Movie / special entries: /watch/.../[ms]-N with a movie|special badge.
-    const msRe = /<a href="(\/watch\/[^"]*?\/[ms]-(\d+))"[^>]*>[\s\S]*?<span class="badge badge-(movie|special)"/g;
-    while ((m = msRe.exec(html)) !== null) {
-      const href = this.base + m[1].trim();
-      if (seen.has(href)) continue;
-      seen.add(href);
-      const number = parseInt(m[2], 10);
-      const kind = m[3] === "movie" ? "Movie" : "Special";
-      episodes.push({ dataIds: href, number, title: `${kind} ${number}` });
-    }
-    return episodes.sort((a, b) => a.number - b.number);
-  }
-
-  async findAvailableServers(dataIds, audio) {
-    const watchUrl = dataIds;
-    const res = await robustFetch(watchUrl, { headers: { "User-Agent": this.ua, Referer: this.base } });
-    if (!res.ok) throw new Error("Failed to fetch watch page");
-    const html = await res.text();
-
-    const iframeUrls = [...html.matchAll(/<iframe\s+src="([^"]+)"[^>]*><\/iframe>/g)].map(x => this._abs(x[1]));
-    if (!iframeUrls.length) throw new Error("No iframe source found");
-
-    const servers = [];
-    const seen = new Set();
-    const push = (url, name, headers) => {
-      if (!url || seen.has(url)) return;
-      seen.add(url);
-      servers.push({ id: JSON.stringify({ url, headers }), name });
-    };
-
-    for (const iframeUrl of iframeUrls) {
-      let ihtml;
-      try {
-        const ires = await robustFetch(iframeUrl, { headers: { "User-Agent": this.ua, Referer: this.base } });
-        if (!ires.ok) continue;
-        ihtml = await ires.text();
-      } catch { continue; }
-
-      // Streamup: streaming_url : "...m3u8"
-      const sm = ihtml.match(/streaming_url\s*:\s*"([^"]+\.m3u8)"/);
-      if (sm) {
-        push(sm[1], "Streamup", { "User-Agent": this.ua, Referer: "https://strmup.to/", Origin: "https://strmup.to" });
-      }
-
-      // Nested iframes -> FileMoon (P.A.C.K.E.R. packed `file: "..."`).
-      for (const nm of ihtml.matchAll(/<iframe\s+src="([^"]+)"[^>]*><\/iframe>/g)) {
-        try {
-          const nres = await robustFetch(nm[1], { headers: { "User-Agent": this.ua, Referer: iframeUrl } });
-          if (!nres.ok) continue;
-          const nhtml = await nres.text();
-          const packed = nhtml.match(/<script[^>]*>\s*(eval\(function\(p,a,c,k,e,d[\s\S]*?)<\/script>/);
-          if (!packed) continue;
-          const unpacked = unpack(packed[1]);
-          const file = unpacked.match(/file:\s*"([^"]+)"/)?.[1];
-          push(file, "FileMoon", { "User-Agent": this.ua });
-        } catch { /* skip this embed */ }
-      }
-    }
-
-    if (!servers.length) throw new Error("No streams found");
-    return servers;
-  }
-
-  async extractStreamFromLinkId(linkId) {
-    const { url, headers } = JSON.parse(linkId);
-    if (!url) throw new Error("No stream URL");
-    return { file: url, headers: headers || { Referer: this.base }, tracks: [] };
-  }
-}
-
-const allProviders = [
-  new MiruroProvider(), new AnikotoProvider(), new AnimeGGProvider(), new AnimeHeavenProvider(),
-  new AniDBProvider(), new AniDaoProvider(), new AllAnimeProvider(), new AniNekoProvider(),
-  new ReAnimeProvider(), new AniZoneProvider(), new NyanimeProvider(), new SenshiProvider(),
-  new AnimetsuProvider(), new AnimeParadiseProvider(), new AnimeverseProvider(), new KickAssAnimeProvider(),
-  new WcoStreamProvider(), new AnifyProvider(),
-];
-
-async function fetchRawEpisodes(anilistId) {
-  const cacheKey = `raw_episodes:${anilistId}`;
-  const cached = kvGet(cacheKey);
-  if (cached) return cached;
-  const gql = `query ($id: Int) { Media(id: $id, type: ANIME) { episodes title { romaji english } } }`;
-  const data = await anilistQuery(gql, { id: anilistId });
-  const media = data?.Media;
-  if (!media) throw new Error("Anime not found");
-  const result = { episodes: media.episodes || 0, title: media.title?.english || media.title?.romaji };
-  kvPut(cacheKey, result, 7200);
-  return result;
-}
-
-function injectSourceSlugs(rawData, anilistId) {
-  return { ...rawData, anilistId, sources: [] };
-}
-
-async function autoGetStreams(animeName, episodeNumber, dub = false) {
-  const audio = dub ? "dub" : "sub";
-  const timeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
-
-  const results = await Promise.allSettled(
-    allProviders.map(async (provider) => {
-      try {
-        const searchResults = await timeout(provider.search(animeName, dub), 8000);
-        if (!searchResults.length) return null;
-        const episodes = await timeout(provider.findEpisodes(searchResults[0].url), 8000);
-        const episode = episodes.find(ep => ep.number === episodeNumber);
-        if (!episode) return null;
-        const servers = await timeout(provider.findAvailableServers(episode.dataIds, audio), 8000);
-        for (const server of servers) {
-          try {
-            const stream = await timeout(provider.extractStreamFromLinkId(server.id), 10000);
-            if (stream?.file) return { provider: provider.name, serverName: server.name, stream };
-          } catch {}
+            hasNextPage = media.airingSchedule?.pageInfo?.hasNextPage || false;
+            page++;
         }
-        return null;
-      } catch (e) { return null; }
-    })
-  );
-  return results.filter(r => r.status === 'fulfilled' && r.value !== null).map(r => r.value);
-}
 
-app.use(compression({ filter: (req, res) => { if (req.headers['x-no-compression']) return false; return compression.filter(req, res); }, threshold: 512 }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.static('public', { maxAge: '1h', etag: false }));
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
-});
-app.disable('x-powered-by');
+        const mediaQuery = `
+            query ($id: Int) {
+                Media(id: $id, type: ANIME) {
+                    id title { romaji english native } season seasonYear episodes status
+                }
+            }
+        `;
+        const mediaResponse = await axios.post('https://graphql.anilist.co',
+            { query: mediaQuery, variables: { id: anilistId } },
+            { timeout: 5000 }
+        );
+        const media = mediaResponse.data.data?.Media;
 
-app.get('/health', (req, res) => {
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  return res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-app.get('/stream', async (req, res) => {
-  const videoUrl = req.query.url;
-  if (!videoUrl) return res.status(400).json({ error: 'Missing url parameter' });
-  try {
-    const response = await fetch(videoUrl, { headers: { 'User-Agent': USER_AGENT } });
-    if (!response.ok) throw new Error(`Failed to fetch video: ${response.status}`);
-    const contentType = response.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
-    const contentLength = response.headers.get('content-length');
-    if (contentLength) {
-      res.setHeader('Content-Length', contentLength);
-      res.setHeader('Accept-Ranges', 'bytes');
-    }
-    res.set('Cache-Control', 'public, max-age=86400');
-    const reader = response.body.getReader();
-    res.on('close', () => {
-      try { reader.cancel(); } catch {}
-    });
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!res.write(value)) {
-        await new Promise(resolve => response.body.once('drain', resolve));
-      }
-    }
-    res.end();
-  } catch (err) {
-    console.error('Stream error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    } else {
-      res.end();
-    }
-  }
-});
-
-app.get('/total-episodes/:anilistId', async (req, res) => {
-  const anilistId = parseInt(req.params.anilistId);
-  if (isNaN(anilistId)) return res.status(400).json({ error: 'Invalid anilistId' });
-  try {
-    const query = `query ($id: Int) { Media(id: $id, type: ANIME) { episodes status } }`;
-    const data = await anilistQuery(query, { id: anilistId });
-    const media = data?.Media;
-    if (!media) return res.status(404).json({ error: 'Anime not found' });
-    res.json({ totalEpisodes: media.episodes ?? null, status: media.status ?? null, anilistId });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/total-episodes-by-title', async (req, res) => {
-  const title = req.query.q;
-  if (!title) return res.status(400).json({ error: 'Missing q' });
-  try {
-    const searchQuery = `query ($search: String) { Media(search: $search, type: ANIME) { id episodes status } }`;
-    const data = await anilistQuery(searchQuery, { search: title });
-    const media = data?.Media;
-    if (!media) return res.status(404).json({ error: 'Anime not found' });
-    res.json({ totalEpisodes: media.episodes ?? null, status: media.status ?? null, anilistId: media.id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/total', async (req, res) => {
-  try {
-    const anidbProvider = allProviders.find(p => p.name === "AniDB");
-    if (!anidbProvider) return res.status(500).json({ error: 'AniDB provider not found' });
-    const stats = await anidbProvider.getStats();
-    res.json(stats);
-  } catch (err) {
-    console.error('Error in /total endpoint:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.all('*', async (req, res) => {
-  const fullUrl = `http://${req.headers.host}${req.originalUrl}`;
-  const url = new URL(fullUrl);
-  const path = url.pathname;
-  const json = (data, status=200) => res.status(status).json(data);
-  const error = (msg, status=400) => json({ error: msg }, status);
-
-  try {
-    if (path === '/status') {
-      const cacheKey = 'status:providers';
-      const cached = kvGet(cacheKey);
-      if (cached && Date.now() - cached.timestamp < 30000) return json(cached);
-      const timeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
-      const providerStatuses = await Promise.all(allProviders.map(async p => {
-        // Use the provider's own site; no hardcoded fallback host.
-        const siteUrl = p.baseUrl || p.base || p.apiBase || p.apiUrl;
-        if (!siteUrl) return { name: p.name, online: false };
-        // Connectivity check only: can we reach the site and does it respond?
-        // Read the response status from the headers; HEAD first, GET as a fallback
-        // for hosts that reject HEAD. No hardcoded title/search involved.
-        const reachable = async (method) => {
-          const res = await timeout(robustFetch(siteUrl, { method, timeout: 3000 }), 4000);
-          return !!res && typeof res.status === "number" && res.status < 500;
+        return {
+            title: media?.title?.romaji || media?.title?.english || 'Unknown',
+            episodes: media?.episodes,
+            season: media?.season,
+            seasonYear: media?.seasonYear,
+            status: media?.status,
+            anilistId: anilistId,
+            episodeTimes: allEpisodes
         };
-        try {
-          const online = (await reachable("HEAD").catch(() => false))
-            || (await reachable("GET").catch(() => false));
-          return { name: p.name, online };
-        } catch {
-          return { name: p.name, online: false };
+    } catch(e) { debugLog(`AniList episodes fetch failed: ${e.message}`); }
+    return null;
+}
+
+async function fetchAnilistEpisodeTitles(anilistId) {
+    try {
+        let episodeTitles = {};
+
+        const query = `
+            query ($id: Int, $page: Int) {
+                Page(page: $page, perPage: 50) {
+                    pageInfo { hasNextPage }
+                    media(id: $id) {
+                        episodes
+                    }
+                    airingSchedules(mediaId: $id) {
+                        episode
+                        airingAt
+                    }
+                }
+            }
+        `;
+
+        const characterQuery = `
+            query ($id: Int) {
+                Media(id: $id, type: ANIME) {
+                    streamingEpisodes {
+                        title
+                        thumbnail
+                        url
+                    }
+                }
+            }
+        `;
+
+        const response = await axios.post('https://graphql.anilist.co',
+            { query: characterQuery, variables: { id: anilistId } },
+            { timeout: 5000 }
+        );
+
+        const media = response.data.data?.Media;
+        if (media?.streamingEpisodes) {
+            media.streamingEpisodes.forEach((ep, idx) => {
+                if (ep.title) {
+                    episodeTitles[idx + 1] = ep.title;
+                }
+            });
         }
-      }));
-      const result = { timestamp: Date.now(), providers: providerStatuses };
-      kvPut(cacheKey, result, 30);
-      return json(result);
+
+        return episodeTitles;
+    } catch(e) { debugLog(`AniList episode titles fetch failed: ${e.message}`); }
+    return {};
+}
+
+async function fetchTotalEpisodesFromWorker(title, anilistId, apiBaseUrl) {
+    const base = apiBaseUrl || loadSettings().apiBaseUrl;
+    try {
+        let url;
+        if (anilistId) url = `${base}/total-episodes/${anilistId}`;
+        else url = `${base}/total-episodes-by-title?q=${encodeURIComponent(title)}`;
+        const response = await axios.get(url, { timeout: 5000 });
+        const data = response.data;
+        if (data && (data.totalEpisodes !== undefined || data.totalEpisodes === null)) {
+            return { totalEpisodes: data.totalEpisodes, status: data.status || null, anilistId: data.anilistId || anilistId || null };
+        }
+        return null;
+    } catch(e) { return null; }
+}
+
+function loadWatchlist() {
+    try {
+        if (fs.existsSync(WATCHLIST_PATH)) return JSON.parse(fs.readFileSync(WATCHLIST_PATH, 'utf8'));
+    } catch(e) {}
+    return [];
+}
+
+function saveWatchlist(list) {
+    try { fs.writeFileSync(WATCHLIST_PATH, JSON.stringify(list, null, 2), 'utf8'); } catch(e) {}
+}
+
+function loadProgress() {
+    try {
+        if (fs.existsSync(PROGRESS_PATH)) return JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
+    } catch(e) {}
+    return {};
+}
+
+function saveProgress(progress) {
+    try { fs.writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2), 'utf8'); } catch(e) {}
+}
+
+function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId, position = 0, quality = null, seasonInfo = null) {
+    try {
+        const list = loadWatchlist();
+        const existingIdx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+        const matchesData = selectedMatches.map(m => ({
+            providerName: m.provider.name,
+            url: m.item.url,
+            hasSub: m.item.hasSub,
+            hasDub: m.item.hasDub
+        }));
+        const newItem = {
+            title, lastEpisode: episode, audio, timestamp: new Date().toISOString(),
+            matches: matchesData, totalEpisodes, anilistId, position, quality, lastWatched: Date.now()
+        };
+        if (seasonInfo) {
+            newItem.season = seasonInfo.season;
+            newItem.seasonYear = seasonInfo.seasonYear;
+        }
+        if (existingIdx !== -1) {
+            if (totalEpisodes === undefined && list[existingIdx].totalEpisodes) newItem.totalEpisodes = list[existingIdx].totalEpisodes;
+            if (anilistId === undefined && list[existingIdx].anilistId) newItem.anilistId = list[existingIdx].anilistId;
+            newItem.position = position || list[existingIdx].position || 0;
+            newItem.quality = quality || list[existingIdx].quality || null;
+            if (!seasonInfo && list[existingIdx].season) newItem.season = list[existingIdx].season;
+            if (!seasonInfo && list[existingIdx].seasonYear) newItem.seasonYear = list[existingIdx].seasonYear;
+            list[existingIdx] = newItem;
+        } else list.unshift(newItem);
+        saveWatchlist(list);
+    } catch(e) {}
+}
+
+function updateWatchlistPosition(title, episode, position) {
+    const list = loadWatchlist();
+    const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+    if (idx !== -1 && list[idx].lastEpisode === episode) {
+        list[idx].position = position;
+        saveWatchlist(list);
     }
-    if (path === '/auto/search') {
-      const q = url.searchParams.get('q');
-      const dub = url.searchParams.get('dub') === 'true';
-      if (!q) return error("Missing q");
-      const cacheKey = `search:${q}:${dub}`;
-      const cached = kvGet(cacheKey);
-      if (cached) return json({ results: cached, cached: true });
-      const timeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
-      const settled = await Promise.allSettled(allProviders.map(async p =>
-        timeout(p.search(q, dub), 6000).then(r => r.map(x => ({ ...x, provider: p.name })))
-      ));
-      const results = settled.filter(r => r.status === 'fulfilled').flatMap(r => r.value || []);
-      kvPut(cacheKey, results, 1800);
-      return json({ results });
+    const progress = loadProgress();
+    const key = `${title}|${episode}`;
+    progress[key] = position;
+    saveProgress(progress);
+}
+
+function getResumePosition(title, episode) {
+    const list = loadWatchlist();
+    const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+    if (idx !== -1 && list[idx].lastEpisode === episode && list[idx].position) {
+        return list[idx].position;
     }
-    if (path === '/auto/episodes') {
-      const q = url.searchParams.get('q');
-      const dub = url.searchParams.get('dub') === 'true';
-      if (!q) return error("Missing q");
-      const cacheKey = `episodes:${q}:${dub}`;
-      const cached = kvGet(cacheKey);
-      if (cached) return json({ ...cached, cached: true });
-      const timeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
-      try {
-        const settled = await Promise.allSettled(allProviders.map(async p =>
-          timeout(p.search(q, dub), 5000).then(async r => {
-            if (!r.length) throw new Error("no results");
-            return { provider: p.name, episodes: await timeout(p._cachedEpisodes(r[0].url), 7000) };
-          })
-        ));
-        const result = settled.find(r => r.status === 'fulfilled' && r.value?.episodes?.length > 0)?.value;
-        if (!result) return error("No provider found", 404);
-        kvPut(cacheKey, result, 1800);
-        return json(result);
-      } catch { return error("No provider found", 404); }
+    const progress = loadProgress();
+    const key = `${title}|${episode}`;
+    return progress[key] || 0;
+}
+
+function deleteWatchlistItem(index) {
+    const list = loadWatchlist();
+    if (index >= 0 && index < list.length) { list.splice(index, 1); saveWatchlist(list); }
+}
+
+function updateWatchlistEpisode(title, newEpisode) {
+    const list = loadWatchlist();
+    const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+    if (idx !== -1) { list[idx].lastEpisode = newEpisode; list[idx].position = 0; saveWatchlist(list); }
+}
+
+function updateWatchlistAudio(title, audio) {
+    const list = loadWatchlist();
+    const idx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
+    if (idx !== -1) { list[idx].audio = audio; saveWatchlist(list); }
+}
+
+function clearWatchlist() { 
+    try { if (fs.existsSync(WATCHLIST_PATH)) fs.unlinkSync(WATCHLIST_PATH); } catch(e) {} 
+}
+
+function readJsonFile(filePath, fallback) {
+    try { if (!fs.existsSync(filePath)) return fallback; return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch(e) { return fallback; }
+}
+
+function writeJsonFile(filePath, value) { try { fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8'); } catch(e) {} }
+
+function loadSettings() {
+    const stored = readJsonFile(SETTINGS_PATH, {});
+    return {
+        bingeCountdownSeconds: typeof stored.bingeCountdownSeconds === "number" ? Math.min(Math.max(stored.bingeCountdownSeconds, 3), 120) : defaultSettings.bingeCountdownSeconds,
+        pageSize: typeof stored.pageSize === "number" ? Math.min(Math.max(stored.pageSize, 6), 20) : defaultSettings.pageSize,
+        apiBaseUrl: typeof stored.apiBaseUrl === "string" && stored.apiBaseUrl.trim() ? stored.apiBaseUrl.trim() : defaultSettings.apiBaseUrl,
+        defaultAudio: stored.defaultAudio === "dub" ? "dub" : "sub",
+        mpvArgs: typeof stored.mpvArgs === "string" ? stored.mpvArgs : defaultSettings.mpvArgs,
+        playbackSpeed: typeof stored.playbackSpeed === "number" ? Math.min(Math.max(stored.playbackSpeed, 0.5), 3.0) : 1.0,
+        enableUpdateCheck: typeof stored.enableUpdateCheck === "boolean" ? stored.enableUpdateCheck : true,
+        autoPlayNext: typeof stored.autoPlayNext === "boolean" ? stored.autoPlayNext : false,
+        discordEnabled: typeof stored.discordEnabled === "boolean" ? stored.discordEnabled : false,
+        discordClientId: typeof stored.discordClientId === "string" && stored.discordClientId.trim() ? stored.discordClientId.trim() : defaultSettings.discordClientId,
+        downloadDir: typeof stored.downloadDir === "string" && stored.downloadDir.trim() ? stored.downloadDir.trim() : defaultSettings.downloadDir,
+        downloadConcurrency: typeof stored.downloadConcurrency === "number" ? Math.min(Math.max(stored.downloadConcurrency, 1), 5) : defaultSettings.downloadConcurrency,
+        downloadFormat: stored.downloadFormat === "mp4" ? "mp4" : "mkv",
+        resumePlayback: typeof stored.resumePlayback === "boolean" ? stored.resumePlayback : true,
+        preferredQuality: typeof stored.preferredQuality === "string" ? stored.preferredQuality : defaultSettings.preferredQuality,
+        cacheTTL: typeof stored.cacheTTL === "number" ? stored.cacheTTL : defaultSettings.cacheTTL,
+        cacheMaxSize: typeof stored.cacheMaxSize === "number" ? stored.cacheMaxSize : defaultSettings.cacheMaxSize,
+        maxRetries: typeof stored.maxRetries === "number" ? stored.maxRetries : defaultSettings.maxRetries,
+        requestTimeout: typeof stored.requestTimeout === "number" ? stored.requestTimeout : defaultSettings.requestTimeout,
+        autoSelectBestMatch: typeof stored.autoSelectBestMatch === "boolean" ? stored.autoSelectBestMatch : defaultSettings.autoSelectBestMatch,
+        minSimilarityScore: typeof stored.minSimilarityScore === "number" ? stored.minSimilarityScore : defaultSettings.minSimilarityScore,
+        enableNotifications: typeof stored.enableNotifications === "boolean" ? stored.enableNotifications : defaultSettings.enableNotifications,
+        autoRetryFailed: typeof stored.autoRetryFailed === "boolean" ? stored.autoRetryFailed : defaultSettings.autoRetryFailed,
+        logLevel: typeof stored.logLevel === "string" ? stored.logLevel : defaultSettings.logLevel,
+        autoBackup: typeof stored.autoBackup === "boolean" ? stored.autoBackup : defaultSettings.autoBackup,
+        confirmBeforeExit: typeof stored.confirmBeforeExit === "boolean" ? stored.confirmBeforeExit : defaultSettings.confirmBeforeExit
+    };
+}
+
+function saveSettings(settings) { writeJsonFile(SETTINGS_PATH, settings); }
+
+function loadSearchHistory() {
+    const history = readJsonFile(SEARCH_HISTORY_PATH, []);
+    return Array.isArray(history) ? history.filter(item => typeof item === "string" && item.trim()).slice(0, 50) : [];
+}
+
+function saveSearchToHistory(query) {
+    const clean = query.trim();
+    if (!clean) return;
+    const next = [clean, ...loadSearchHistory().filter(item => item.toLowerCase() !== clean.toLowerCase())].slice(0, 50);
+    writeJsonFile(SEARCH_HISTORY_PATH, next);
+}
+
+function deleteSearchHistoryItem(index) {
+    const history = loadSearchHistory();
+    if (index >= 0 && index < history.length) { history.splice(index, 1); writeJsonFile(SEARCH_HISTORY_PATH, history); }
+}
+
+function clearSearchHistory() { try { if (fs.existsSync(SEARCH_HISTORY_PATH)) fs.unlinkSync(SEARCH_HISTORY_PATH); } catch(e) {} }
+
+function clearScreen() { console.clear(); }
+
+// FIXED: Safe string padding functions with bounds checking
+function stripAnsi(value) { 
+    return value.replace(/\x1b\[[0-9;]*m/g, ""); 
+}
+
+function visibleLength(value) { 
+    return stripAnsi(value).length; 
+}
+
+// FIXED: Ensures we never pass negative values to repeat()
+function padRightVisible(value, width) { 
+    const visible = visibleLength(value);
+    if (visible >= width) return value;
+    const padding = Math.max(0, width - visible);
+    return value + " ".repeat(padding); 
+}
+
+// FIXED: Safe box rendering with bounds checking
+function renderBox(title, content, color = C.green) {
+    const maxLen = Math.max(title.length, ...content.map(l => visibleLength(l))) + 4;
+    const safeLen = Math.max(1, maxLen); // Ensure at least 1
+    
+    const top = `${color}╭${"─".repeat(Math.max(0, safeLen))}╮${C.reset}`;
+    const titlePadding = Math.max(0, safeLen - title.length - 1);
+    const titleLine = `${color}│${C.reset} ${C.bold}${color}${title}${C.reset}${" ".repeat(titlePadding)}${color}│${C.reset}`;
+    const mid = `${color}├${"─".repeat(Math.max(0, safeLen))}┤${C.reset}`;
+    const bottom = `${color}╰${"─".repeat(Math.max(0, safeLen))}╯${C.reset}`;
+    
+    console.log(top);
+    console.log(titleLine);
+    console.log(mid);
+    for (const line of content) {
+        const padding = Math.max(0, safeLen - visibleLength(line) - 1);
+        console.log(`${color}│${C.reset} ${line}${" ".repeat(padding)}${color}│${C.reset}`);
     }
-    if (path === '/auto/stream') {
-      const q = url.searchParams.get('q');
-      const ep = parseInt(url.searchParams.get('ep'));
-      const dub = url.searchParams.get('dub') === 'true';
-      if (!q || isNaN(ep)) return error("Missing q or ep");
-      const streams = await autoGetStreams(q, ep, dub);
-      if (!streams.length) return error("No working stream", 404);
-      return json({ firstWorking: streams[0], allWorkingStreams: streams });
+    console.log(bottom);
+}
+
+function renderHeader(title, subtitle) {
+    const cat = `
+${C.cyan}${C.bold}        /\\_____/\\     /\\_____/\\${C.reset}
+${C.cyan}${C.bold}       /  o   o  \\   /  o   o  \\${C.reset}
+${C.green}${C.bold}      ( ==  ^  == ) ( ==  ^  == )${C.reset}
+${C.green}${C.bold}       )         (   )         (${C.reset}
+${C.green}${C.bold}      (           ) (           )${C.reset}
+${C.cyan}${C.bold}     ( (  )   (  ) ) (  )   (  ) )${C.reset}
+${C.cyan}${C.bold}    (__(__)___(__)__) (__(__)___(__)__)${C.reset}
+${C.reset}`;
+    const logo = `${C.green}${C.bold}  ██╗  ██╗██╗████████╗████████╗██╗   ██╗ ██████╗██╗     ██╗${C.reset}
+${C.cyan}${C.bold}  ██║ ██╔╝██║╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝██╔════╝██║     ██║${C.reset}
+${C.green}${C.bold}  █████╔╝ ██║   ██║      ██║    ╚████╔╝ ██║     ██║     ██║${C.reset}
+${C.cyan}${C.bold}  ██╔═██╗ ██║   ██║      ██║     ╚██╔╝  ██║     ██║     ██║${C.reset}
+${C.green}${C.bold}  ██║  ██╗██║   ██║      ██║      ██║   ╚██████╗███████╗██║${C.reset}
+${C.cyan}${C.bold}  ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝      ╚═╝    ╚═════╝╚══════╝╚═╝${C.reset}`;
+    console.log(cat);
+    console.log(logo);
+    const width = 62;
+    const line = "═".repeat(width);
+    const center = (value) => {
+        const cleanLength = visibleLength(value);
+        const left = Math.max(0, Math.floor((width - cleanLength) / 2));
+        return " ".repeat(left) + value;
+    };
+    console.log(`\n${C.bold}${C.green}╔${line}╗${C.reset}`);
+    console.log(`${C.bold}${C.green}║${C.reset}${center(`${C.bold}${C.cyan}${title}${C.reset}`)}${C.bold}${C.green}║${C.reset}`);
+    if (subtitle) console.log(`${C.bold}${C.green}║${C.reset}${center(`${C.dim}${C.yellow}${subtitle}${C.reset}`)}${C.bold}${C.green}║${C.reset}`);
+    console.log(`${C.bold}${C.green}╚${line}╝${C.reset}`);
+}
+
+function renderStatusBar(providersCount, apiUrl, additional) {
+    const W = process.stdout.columns || 100;
+    const safeW = Math.max(50, W); // Minimum width of 50
+    const parts = [
+        `${C.bold}${C.green}🐱 kittycli${C.reset} ${C.dim}v${APP_VERSION}${C.reset}`,
+        `${C.cyan}${providersCount}${C.reset}${C.dim} providers${C.reset}`,
+        `${C.dim}api:${C.reset} ${C.yellow}${apiUrl.length > 30 ? apiUrl.substring(0, 27) + '...' : apiUrl}${C.reset}`,
+        additional || `${C.dim}↑↓ move  ↵ select  1-9 jump  q back  ? help${C.reset}`
+    ];
+    console.log(`\n${C.dim}${"─".repeat(safeW)}${C.reset}`);
+    console.log(parts.join(`  ${C.dim}│${C.reset}  `));
+    console.log(`${C.dim}${"─".repeat(safeW)}${C.reset}`);
+}
+
+function normalizeTitle(title) { return title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim(); }
+
+function resolveEpisodeDataIds(epObj) {
+    if (!epObj) return null;
+    if (epObj.dataIds != null) return epObj.dataIds;
+    if (epObj.id != null) return epObj.id;
+    if (epObj.episodeId != null) return epObj.episodeId;
+    if (epObj.episode_id != null) return epObj.episode_id;
+    if (epObj.data_id != null) return epObj.data_id;
+    if (epObj.dataId != null) return epObj.dataId;
+    if (epObj.sourceId != null) return epObj.sourceId;
+    if (epObj.linkId != null) return epObj.linkId;
+    return null;
+}
+
+function parseEpisodeNumber(ep) {
+    let num = ep.number ?? ep.episode ?? ep.num;
+    if (typeof num === 'string') num = parseInt(num, 10);
+    if (typeof num === 'number' && !isNaN(num)) return num;
+    return null;
+}
+
+function getWatchlistInfo(title) {
+    const list = loadWatchlist();
+    const normalized = normalizeTitle(title);
+    const item = list.find(i => normalizeTitle(i.title) === normalized);
+    if (item) return { lastEpisode: item.lastEpisode, totalEpisodes: item.totalEpisodes, audio: item.audio, anilistId: item.anilistId, position: item.position || 0, quality: item.quality || null };
+    return null;
+}
+
+function audioLabel(hasSub, hasDub) {
+    if (hasSub && hasDub) return "SUB+DUB";
+    if (hasDub) return "DUB";
+    return "SUB";
+}
+
+function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function pauseForKey(message = "press any key to continue...") {
+    console.log(`\n${C.dim}  ${message}${C.reset}`);
+    if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
+        await wait(1200);
+        return;
     }
-    if (path === '/miruro/search') {
-      const q = url.searchParams.get('q');
-      if (!q) return error("Missing q");
-      const gql = `query ($search: String) { Page(page:1,perPage:20) { media(search:$search,type:ANIME) { id title { romaji english } } } }`;
-      const data = await anilistQuery(gql, { search: q });
-      return json(data);
+    await new Promise((resolve) => {
+        const isRaw = process.stdin.isRaw;
+        process.stdin.setRawMode(true);
+        const onData = () => {
+            process.stdin.setRawMode(isRaw);
+            process.stdin.removeListener('data', onData);
+            resolve();
+        };
+        process.stdin.once('data', onData);
+    });
+}
+
+async function withSpinner(message, task) {
+    const frames = ['◐', '◓', '◑', '◒'];
+    let i = 0;
+    const interval = setInterval(() => {
+        process.stdout.write(`\r  ${C.cyan}${frames[i]}${C.reset} ${C.dim}${message}${C.reset}  `);
+        i = (i + 1) % frames.length;
+    }, 120);
+    try {
+        const result = await task();
+        clearInterval(interval);
+        process.stdout.write(`\r  ${C.green}✓${C.reset} ${message}${" ".repeat(Math.max(0, 30 - message.length))}\n`);
+        return result;
+    } catch (err) {
+        clearInterval(interval);
+        process.stdout.write(`\r  ${C.red}✗${C.reset} ${message}${" ".repeat(Math.max(0, 30 - message.length))}\n`);
+        throw err;
     }
-    if (path.match(/^\/miruro\/info\/\d+$/)) {
-      const id = parseInt(path.split('/')[3]);
-      const gql = `query ($id: Int) { Media(id: $id, type: ANIME) { id title { romaji english } format episodes status coverImage { large } } }`;
-      const data = await anilistQuery(gql, { id });
-      if (!data.Media) return error("Not found", 404);
-      return json(data.Media);
+}
+
+async function withRetry(fn, retries = 3, delay = 1000) {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            debugLog(`Retry ${i+1}/${retries} failed:`, err.message);
+            if (i === retries - 1) throw err;
+            await wait(delay * Math.pow(2, i));
+        }
     }
-    if (path.match(/^\/miruro\/episodes\/\d+$/)) {
-      const anilistId = parseInt(path.split('/')[3]);
-      const rawData = await fetchRawEpisodes(anilistId);
-      const dataWithSlugs = injectSourceSlugs(rawData, anilistId);
-      return json(dataWithSlugs);
+    throw lastError;
+}
+
+function isMpvAvailable() {
+    const cmd = os.platform() === "win32" ? "where mpv" : "which mpv";
+    try { execSync(cmd, { stdio: 'ignore' }); return true; } catch(e) { return false; }
+}
+
+async function downloadSubtitle(subtitleUrl, outputPath) {
+    try {
+        const response = await axios({ url: subtitleUrl, method: 'GET', responseType: 'text', timeout: 10000 });
+        fs.writeFileSync(outputPath, response.data);
+        return true;
+    } catch(e) { return false; }
+}
+
+function selectQuality(qualities, preferred) {
+    if (!qualities || qualities.length === 0) return null;
+    const sorted = [...qualities].sort((a,b) => {
+        const getHeight = (q) => {
+            const match = String(q).match(/(\d+)p/);
+            return match ? parseInt(match[1]) : 0;
+        };
+        return getHeight(b) - getHeight(a);
+    });
+    if (preferred === 'auto') return sorted[0];
+    const found = sorted.find(q => String(q).toLowerCase().includes(preferred.toLowerCase()));
+    return found || sorted[0];
+}
+
+async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNum, totalEpisodes, audio, providerName, serverName) {
+    if (!isMpvAvailable()) {
+        renderBox("error", ["mpv not installed. cannot play video."], C.red);
+        return false;
     }
-    if (path.startsWith('/provider/')) {
-      const parts = path.split('/');
-      const providerName = parts[2];
-      const action = parts[3];
-      const provider = allProviders.find(p => p.name.toLowerCase() === providerName.toLowerCase());
-      if (!provider) return error("Provider not found", 404);
-      if (providerName.toLowerCase() === 'anidb' && action === 'stats') {
-        const stats = await provider.getStats();
-        return json(stats);
-      }
-      if (action === 'search') {
-        const q = url.searchParams.get('q');
-        const dub = url.searchParams.get('dub') === 'true';
-        if (!q) return error("Missing q");
-        return json(await provider.search(q, dub));
-      }
-      if (action === 'episodes') {
-        const seriesUrl = url.searchParams.get('url');
-        if (!seriesUrl) return error("Missing url");
-        return json(await provider.findEpisodes(seriesUrl));
-      }
-      if (action === 'servers') {
-        const dataIds = url.searchParams.get('dataIds');
-        const audio = url.searchParams.get('audio');
-        if (!dataIds || !audio) return error("Missing dataIds or audio");
-        return json(await provider.findAvailableServers(dataIds, audio));
-      }
-      if (action === 'stream') {
-        const linkId = url.searchParams.get('linkId');
-        if (!linkId) return error("Missing linkId");
-        return json(await provider.extractStreamFromLinkId(linkId));
-      }
-      return error("Invalid action", 404);
+    if (settings.discordEnabled && discordReady && stream && stream.file) {
+        setDiscordPresence(animeTitle, episodeNum, totalEpisodes, audio, stream.file, providerName, serverName);
     }
-    return error("Not found", 404);
-  } catch (err) {
-    console.error(err);
-    return error(err.message, 500);
-  }
+    return new Promise(async (resolve) => {
+        console.log(`\n  ${C.cyan}◈${C.reset} ${C.bold}launching mpv...${C.reset}`);
+        const referrer = stream.headers?.Referer || stream.referer || '';
+        const origin = stream.headers?.Origin || stream.origin || '';
+        let baseArgs = [
+            stream.file,
+            `--referrer=${referrer}`,
+            `--http-header-fields=Origin: ${origin}`,
+            "--keep-open=no",
+            "--save-position-on-quit=yes",
+            "--resume-playback=yes",
+            `--speed=${settings.playbackSpeed}`,
+            `--title=${displayTitle.substring(0, 200)}`
+        ];
+        let resumePos = 0;
+        if (settings.resumePlayback) {
+            resumePos = getResumePosition(animeTitle, episodeNum);
+            if (resumePos > 5) {
+                baseArgs.push(`--start=${resumePos}`);
+                console.log(`  ${C.dim}resuming from ${Math.floor(resumePos/60)}:${(resumePos%60).toString().padStart(2,'0')}${C.reset}`);
+            }
+        }
+        let args = baseArgs;
+        if (settings.mpvArgs && settings.mpvArgs.trim()) {
+            const extra = settings.mpvArgs.trim().split(/\s+/);
+            args = [...baseArgs, ...extra];
+        }
+        const socketPath = path.join(os.tmpdir(), `mpv-socket-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`);
+        args.push(`--input-ipc-server=${socketPath}`);
+        const mpv = spawn('mpv', args, { stdio: 'inherit' });
+        let lastPosition = resumePos;
+        let socket = null;
+        let positionInterval = null;
+        let retryCount = 0;
+        const connectSocket = () => {
+            if (!settings.resumePlayback) return;
+            const tryConnect = () => {
+                socket = net.createConnection(socketPath, () => {
+                    debugLog('Connected to mpv IPC');
+                    socket.write(JSON.stringify({ command: ["observe_property", 1, "time-pos"] }) + '\n');
+                    positionInterval = setInterval(() => {
+                        if (socket && !socket.destroyed) {
+                            socket.write(JSON.stringify({ command: ["get_property", "time-pos"] }) + '\n');
+                        }
+                    }, 5000);
+                });
+                socket.on('data', (data) => {
+                    try {
+                        const lines = data.toString().split('\n');
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            const msg = JSON.parse(line);
+                            if (msg.event === 'property-change' && msg.name === 'time-pos' && typeof msg.data === 'number') {
+                                if (msg.data > 5) lastPosition = msg.data;
+                            } else if (msg.request_id === undefined && msg.error === undefined && typeof msg.data === 'number') {
+                                if (msg.data > 5) lastPosition = msg.data;
+                            }
+                        }
+                    } catch(e) {}
+                });
+                socket.on('error', (err) => {
+                    debugLog('IPC socket error:', err.message);
+                    if (retryCount < 3) {
+                        retryCount++;
+                        setTimeout(tryConnect, 1000);
+                    }
+                });
+            };
+            tryConnect();
+        };
+        connectSocket();
+        mpv.on('close', (code) => {
+            if (positionInterval) clearInterval(positionInterval);
+            if (socket) socket.destroy();
+            if (settings.resumePlayback && lastPosition > 10 && Math.abs(lastPosition - resumePos) > 5) {
+                updateWatchlistPosition(animeTitle, episodeNum, lastPosition);
+            }
+            if (settings.discordEnabled && discordReady) clearDiscordPresence();
+            resolve(code === 0);
+        });
+        mpv.on('error', (err) => { 
+            console.log(`  ${C.red}✗ mpv error: ${err.message}${C.reset}`);
+            if (positionInterval) clearInterval(positionInterval);
+            if (socket) socket.destroy();
+            if (settings.discordEnabled && discordReady) clearDiscordPresence();
+            resolve(false); 
+        });
+    });
+}
+
+async function downloadWithFfmpegProgress(url, outputPath, format = 'mkv') {
+    return new Promise((resolve) => {
+        const args = ['-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-f', format, '-y', outputPath];
+        const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let duration = 0, lastProgress = 0;
+        ffmpeg.stderr.on('data', (data) => {
+            const str = data.toString();
+            const durationMatch = str.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+            if (durationMatch && duration === 0) {
+                const hours = parseInt(durationMatch[1]), minutes = parseInt(durationMatch[2]), seconds = parseFloat(durationMatch[3]);
+                duration = hours * 3600 + minutes * 60 + seconds;
+            }
+            const timeMatch = str.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+            if (timeMatch && duration > 0) {
+                const hours = parseInt(timeMatch[1]), minutes = parseInt(timeMatch[2]), seconds = parseFloat(timeMatch[3]);
+                const current = hours * 3600 + minutes * 60 + seconds;
+                const percent = (current / duration) * 100;
+                if (Math.floor(percent) > lastProgress) {
+                    lastProgress = Math.floor(percent);
+                    const filled = Math.min(20, Math.max(0, Math.round(percent / 5)));
+                    const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, 20 - filled));
+                    process.stdout.write(`\r  ${C.cyan}[${bar}]${C.reset} ${C.bold}${percent.toFixed(1)}%${C.reset}  `);
+                }
+            }
+        });
+        ffmpeg.on('close', (code) => {
+            console.log();
+            if (code === 0) { console.log(`  ${C.green}✓ download complete!${C.reset}`); sendNotification('Download Complete', path.basename(outputPath)); resolve(true); }
+            else { console.log(`  ${C.red}✗ ffmpeg failed.${C.reset}`); resolve(false); }
+        });
+        ffmpeg.on('error', (err) => { console.log(`  ${C.red}✗ ffmpeg error: ${err.message}${C.reset}`); resolve(false); });
+    });
+}
+
+async function resumeableDownload(serverDetails, suggestedFilename, onProgress, format = 'mkv') {
+    const settings = loadSettings();
+    const cleanFilename = suggestedFilename.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();
+    const outputDir = settings.downloadDir;
+    if (!fs.existsSync(outputDir)) {
+        try { fs.mkdirSync(outputDir, { recursive: true }); } catch(e) { return false; }
+    }
+    const downloadPath = path.join(outputDir, cleanFilename);
+    const partPath = downloadPath + '.part';
+    const metaPath = downloadPath + '.meta.json';
+
+    let partial = null;
+    if (fs.existsSync(partPath) && fs.existsSync(metaPath)) {
+        try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            if (meta.url === serverDetails.file && meta.outputPath === downloadPath) {
+                partial = meta;
+                console.log(`  ${C.yellow}⟳ resuming from ${(partial.downloadedBytes / 1024 / 1024).toFixed(1)} MB${C.reset}`);
+            } else {
+                fs.unlinkSync(partPath);
+                fs.unlinkSync(metaPath);
+            }
+        } catch(e) {}
+    }
+
+    if (!partial) {
+        renderBox("saving to", [downloadPath], C.cyan);
+        const headers = { Referer: serverDetails.headers?.Referer || serverDetails.referer || '', Origin: serverDetails.headers?.Origin || serverDetails.origin || '' };
+        partial = { url: serverDetails.file, outputPath: downloadPath, downloadedBytes: 0, totalBytes: 0, headers: headers };
+    }
+
+    const pd = partial;
+
+    if (serverDetails.file.includes('.m3u8')) {
+        console.log(`  ${C.magenta}◈ hls stream detected — using ffmpeg${C.reset}`);
+        return downloadWithFfmpegProgress(serverDetails.file, downloadPath, format);
+    }
+
+    try {
+        const headers = { 'Referer': pd.headers.Referer, 'Origin': pd.headers.Origin, 'User-Agent': USER_AGENT };
+        if (pd.downloadedBytes > 0) headers['Range'] = `bytes=${pd.downloadedBytes}-`;
+
+        const response = await axios({ url: pd.url, method: 'GET', responseType: 'stream', headers, timeout: 30000 });
+
+        if (pd.totalBytes === 0) {
+            const contentRange = response.headers['content-range'];
+            if (contentRange) {
+                const match = contentRange.match(/bytes \d+-(\d+)\/\d+/);
+                if (match) pd.totalBytes = parseInt(match[1], 10) + 1;
+            } else {
+                pd.totalBytes = parseInt(String(response.headers['content-length'] || '0'), 10);
+            }
+        }
+
+        fs.writeFileSync(metaPath, JSON.stringify(pd, null, 2));
+        const writer = fs.createWriteStream(partPath, { flags: 'a' });
+        let startTime = Date.now();
+        let lastUpdate = 0;
+        let lastBytes = pd.downloadedBytes;
+
+        response.data.pipe(writer);
+
+        return new Promise((resolve, reject) => {
+            response.data.on('data', (chunk) => {
+                pd.downloadedBytes += chunk.length;
+                const now = Date.now();
+                if (now - lastUpdate > 200 && pd.totalBytes > 0) {
+                    const percent = (pd.downloadedBytes / pd.totalBytes) * 100;
+                    const elapsed = (now - startTime) / 1000;
+                    const speed = (pd.downloadedBytes - lastBytes) / elapsed / 1024 / 1024;
+                    const remaining = pd.totalBytes - pd.downloadedBytes;
+                    const eta = remaining / ((pd.downloadedBytes - lastBytes) / elapsed);
+                    if (onProgress) onProgress(percent, pd.downloadedBytes/1024/1024, pd.totalBytes/1024/1024, speed, eta);
+                    else {
+                        const filled = Math.min(28, Math.max(0, Math.round((pd.downloadedBytes / pd.totalBytes) * 28)));
+                        const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 28 - filled))}${C.reset}`;
+                        process.stdout.write(`\r  [${bar}] ${C.bold}${percent.toFixed(1)}%${C.reset}  ${C.dim}${(pd.downloadedBytes/1024/1024).toFixed(1)}/${(pd.totalBytes/1024/1024).toFixed(1)} MB  ${speed.toFixed(1)} MB/s  eta ${eta.toFixed(0)}s${C.reset}  `);
+                    }
+                    lastUpdate = now;
+                    lastBytes = pd.downloadedBytes;
+                } else if (pd.totalBytes === 0) {
+                    process.stdout.write(`\r  ${C.cyan}↓${C.reset} ${(pd.downloadedBytes / 1024 / 1024).toFixed(1)} MB downloaded...  `);
+                }
+                if (pd.downloadedBytes % (1024 * 1024 * 5) < chunk.length) {
+                    fs.writeFileSync(metaPath, JSON.stringify(pd, null, 2));
+                }
+            });
+
+            writer.on('finish', () => {
+                console.log();
+                fs.renameSync(partPath, downloadPath);
+                if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+                console.log(`  ${C.green}✓ download complete!${C.reset}`);
+                sendNotification('Download Complete', cleanFilename);
+                resolve(true);
+            });
+
+            writer.on('error', (err) => { fs.writeFileSync(metaPath, JSON.stringify(pd, null, 2)); reject(err); });
+            response.data.on('error', (err) => { fs.writeFileSync(metaPath, JSON.stringify(pd, null, 2)); reject(err); });
+        });
+    } catch (err) {
+        renderBox("download error", [err.message], C.red);
+        return false;
+    }
+}
+
+async function batchDownloadQueue(jobs, coreTitle, statusBar, selectedQuality = null) {
+    const settings = loadSettings();
+    const concurrency = settings.downloadConcurrency;
+    console.log(`\n  ${C.bold}${C.green}◈ batch download  ${C.cyan}${jobs.length} episodes${C.reset}  ${C.dim}(concurrency: ${concurrency}, format: ${settings.downloadFormat.toUpperCase()})${C.reset}\n`);
+    let successCount = 0, failCount = 0;
+    let index = 0;
+    async function worker() {
+        while (index < jobs.length) {
+            const i = index++;
+            const job = jobs[i];
+            console.log(`  ${C.dim}[${i+1}/${jobs.length}]${C.reset} ${C.cyan}episode ${job.episode}${C.reset}`);
+            try {
+                const stream = await withSpinner(`fetching stream from ${job.provider.name}...`, async () => await job.provider.extractStreamFromLinkId(job.serverId));
+                if (stream && selectedQuality && stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                    stream.file = stream.qualityUrls[selectedQuality];
+                    console.log(`  ${C.dim}  quality: ${selectedQuality}${C.reset}`);
+                }
+                const ext = settings.downloadFormat;
+                const filename = `${coreTitle} - Episode ${job.episode} (${job.audio.toUpperCase()}).${ext}`;
+                const success = await resumeableDownload(stream, filename, null, ext);
+                if (success) successCount++;
+                else failCount++;
+            } catch (err) {
+                console.log(`  ${C.red}✗ ${err.message}${C.reset}`);
+                failCount++;
+            }
+        }
+    }
+    const workers = Array(concurrency).fill().map(() => worker());
+    await Promise.all(workers);
+    console.log(`\n  ${C.green}✓ ${successCount} done${C.reset}  ${failCount > 0 ? `${C.red}✗ ${failCount} failed${C.reset}` : ''}`);
+    await pauseForKey();
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const askQuestion = (q) => new Promise(res => rl.question(q, res));
+
+async function askNumber(prompt, min, max) {
+    while (true) {
+        const raw = await askQuestion(prompt);
+        const num = parseInt(raw.trim(), 10);
+        if (!isNaN(num) && num >= min && num <= max) return num;
+        console.log(`  ${C.red}Please enter a number between ${min} and ${max}.${C.reset}`);
+    }
+}
+
+let renderScheduled = false;
+
+async function selectMenuOption(options, title, config = {}) {
+    return new Promise((resolve) => {
+        if (options.length === 0) { resolve(-1); return; }
+        let currentPos = 0, resolved = false;
+        const pageSize = config.pageSize ?? loadSettings().pageSize;
+        const pageCount = Math.max(1, Math.ceil(options.length / pageSize));
+        const canUseRawMode = process.stdin.isTTY && typeof process.stdin.setRawMode === "function";
+        if (!canUseRawMode) {
+            if (title) console.log(title);
+            options.forEach((opt, idx) => console.log(`  ${idx + 1}. ${stripAnsi(opt)}`));
+            rl.question(`choose 1-${options.length}: `, (answer) => {
+                const parsed = parseInt(answer.trim(), 10);
+                resolve(Number.isInteger(parsed) && parsed >= 1 && parsed <= options.length ? parsed - 1 : 0);
+            });
+            return;
+        }
+        const isRaw = process.stdin.isRaw;
+        process.stdin.setRawMode(true);
+        readline.emitKeypressEvents(process.stdin);
+        const W = process.stdout.columns || 100;
+        const safeW = Math.max(50, W);
+        
+        const renderMenu = () => {
+            clearScreen();
+            if (title) console.log(title);
+            const page = Math.floor(currentPos / pageSize);
+            const start = page * pageSize;
+            const visibleOptions = options.slice(start, start + pageSize);
+            console.log();
+            visibleOptions.forEach((opt, offset) => {
+                const idx = start + offset;
+                const numberHint = offset < 9 ? `${C.dim}${offset + 1}${C.reset}` : " ";
+                if (idx === currentPos) {
+                    const raw = stripAnsi(opt);
+                    const padded = raw.length < safeW - 8 ? opt + " ".repeat(safeW - 8 - raw.length) : opt;
+                    console.log(`  ${C.bgGreen}${C.green}${C.bold} > ${numberHint}${C.green}  ${padded} ${C.reset}`);
+                } else {
+                    console.log(`  ${C.white}${C.dim}  ${numberHint}${C.reset}  ${opt}${C.reset}`);
+                }
+            });
+            console.log();
+            const footerParts = ["↑↓ move", "↵ select", "1-9 jump"];
+            if (pageCount > 1) footerParts.push(`page ${page+1}/${pageCount}`);
+            if (config.allowBack) footerParts.push("q back");
+            console.log(`  ${C.dim}${footerParts.join("  ·  ")}${C.reset}`);
+            if (config.statusBar) renderStatusBar(config.statusBar.providersCount, config.statusBar.apiUrl);
+        };
+        
+        const scheduleRender = () => {
+            if (renderScheduled) return;
+            renderScheduled = true;
+            setTimeout(() => { renderMenu(); renderScheduled = false; }, 10);
+        };
+        
+        const keyHandler = (_str, key) => {
+            if (resolved) return;
+            if (key && key.name === '?' && !key.ctrl && !key.meta) {
+                showHelp().then(() => scheduleRender());
+                return;
+            }
+            const page = Math.floor(currentPos / pageSize);
+            const pageStart = page * pageSize;
+            const visibleCount = Math.min(pageSize, options.length - pageStart);
+            const quickPick = key?.sequence && /^[1-9]$/.test(key.sequence) ? parseInt(key.sequence, 10) - 1 : -1;
+            if (quickPick >= 0 && quickPick < visibleCount) {
+                currentPos = pageStart + quickPick;
+                resolved = true; cleanup(); resolve(currentPos);
+            } else if (key.name === 'up') { currentPos = currentPos > 0 ? currentPos - 1 : options.length - 1; scheduleRender(); }
+            else if (key.name === 'down') { currentPos = currentPos < options.length - 1 ? currentPos + 1 : 0; scheduleRender(); }
+            else if (key.name === 'left' || key.name === 'pageup') { currentPos = Math.max(0, currentPos - pageSize); scheduleRender(); }
+            else if (key.name === 'right' || key.name === 'pagedown') { currentPos = Math.min(options.length - 1, currentPos + pageSize); scheduleRender(); }
+            else if (key.name === 'home') { currentPos = 0; scheduleRender(); }
+            else if (key.name === 'end') { currentPos = options.length - 1; scheduleRender(); }
+            else if (key.name === 'return') { resolved = true; cleanup(); resolve(currentPos); }
+            else if (config.allowBack && (key.name === 'escape' || key.name === 'q')) { resolved = true; cleanup(); resolve(-1); }
+            else if (key.ctrl && key.name === 'c') { cleanup(); process.exit(0); }
+        };
+        
+        const cleanup = () => { process.stdin.removeListener('keypress', keyHandler); process.stdin.setRawMode(isRaw); };
+        
+        renderMenu();
+        process.stdin.on('keypress', keyHandler);
+    });
+}
+
+async function showHelp() {
+    clearScreen();
+    renderHeader("KITTYCLI HELP", `v${APP_VERSION}`);
+    const content = [
+        `${C.bold}${C.cyan}Navigation${C.reset}`,
+        `  ${C.green}↑ ↓${C.reset}        move through menu`,
+        `  ${C.green}↵${C.reset}          select item`,
+        `  ${C.green}1 – 9${C.reset}      quick-pick visible row`,
+        `  ${C.green}home / end${C.reset} jump to top / bottom`,
+        `  ${C.green}pgup / pgdn${C.reset} change page`,
+        `  ${C.green}?${C.reset}          this help screen`,
+        ``,
+        `${C.bold}${C.cyan}Binge mode${C.reset}`,
+        `  ${C.green}Y${C.reset}          continue to next episode now`,
+        `  ${C.green}N${C.reset}          stop binge`,
+        `  ${C.green}A${C.reset}          toggle audio (sub/dub)`,
+        ``,
+        `${C.bold}${C.cyan}Premium Features${C.reset}`,
+        `  ${C.green}🎬 Multi-provider${C.reset} search & streaming across 15+ sources`,
+        `  ${C.green}📝 Smart Watchlist${C.reset} with progress, seasons & episode tracking`,
+        `  ${C.green}⬇️  Download System${C.reset} (${C.bold}MKV${C.reset}/${C.dim}MP4${C.reset}) with quality selection`,
+        `  ${C.green}🔄 Resumable${C.reset} downloads & playback position sync`,
+        `  ${C.green}⚡ Batch${C.reset} download with parallel processing`,
+        `  ${C.green}🎨 AniList${C.reset} metadata with real episode titles & seasons`,
+        `  ${C.green}💬 Discord${C.reset} Rich Presence & system notifications`,
+        `  ${C.green}🎛️  Playback${C.reset} quality selection on stream`,
+        ``,
+        `${C.bold}${C.cyan}Settings Available${C.reset}`,
+        `  • Download format (MKV/MP4) & quality preferences`,
+        `  • Auto-play, resume, quality defaults`,
+        `  • Binge delay, playback speed`,
+        `  • Provider similarity matching & retry policies`,
+        ``,
+        `${C.bold}${C.cyan}Learn More${C.reset}`,
+        `  ${C.underline}${GITHUB_URL}${C.reset}`,
+        ``,
+        `${C.dim}Press any key to return${C.reset}`
+    ];
+    renderBox("Help & Features", content, C.cyan);
+    await pauseForKey();
+}
+
+async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio, nextEpisodeTitle, onAudioToggle, autoPlayNext) {
+    if (autoPlayNext) return { continue: true };
+    if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
+        const titleText = nextEpisodeTitle ? ` • ${nextEpisodeTitle.substring(0, 50)}` : '';
+        console.log(`  ${C.yellow}Next: Episode ${nextEpisodeNum}${titleText}${C.reset}`);
+        console.log(`  ${C.yellow}Starting in ${seconds}s...${C.reset}`);
+        await wait(seconds * 1000);
+        return { continue: true };
+    }
+    return new Promise((resolve) => {
+        let remaining = seconds, resolved = false;
+        const isRaw = process.stdin.isRaw;
+        process.stdin.setRawMode(true);
+        let audio = currentAudio;
+        const render = () => {
+            const filled = Math.min(20, Math.max(0, Math.round((remaining / seconds) * 20)));
+            const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 20 - filled))}${C.reset}`;
+            const audioTag = audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
+            const epStr = String(nextEpisodeNum).padStart(2, '0');
+            const titleDisplay = nextEpisodeTitle ? ` ${C.dim}•${C.reset} ${C.yellow}${nextEpisodeTitle.substring(0, 35)}${C.reset}` : "";
+            process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶ E${epStr}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y now  N stop  A audio${C.reset} [${audioTag}]  `);
+        };
+        const timer = setInterval(() => {
+            if (resolved) return;
+            remaining--;
+            if (remaining <= 0) {
+                clearInterval(timer);
+                if (!resolved) {
+                    resolved = true;
+                    process.stdin.setRawMode(isRaw);
+                    process.stdin.removeListener('data', onData);
+                    console.log();
+                    resolve({ continue: true, newAudio: audio !== currentAudio ? audio : undefined });
+                }
+            } else render();
+        }, 1000);
+        const onData = (chunk) => {
+            const key = chunk.toString().toLowerCase();
+            if (key === 'y' || key === '\r') {
+                if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(); resolve({ continue: true, newAudio: audio !== currentAudio ? audio : undefined }); }
+            } else if (key === 'n') {
+                if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(`\n  ${C.dim}Binge stopped.${C.reset}`); resolve({ continue: false }); }
+            } else if (key === 'a') {
+                audio = audio === "sub" ? "dub" : "sub";
+                if (onAudioToggle) onAudioToggle();
+                render();
+            }
+        };
+        render();
+        process.stdin.on('data', onData);
+    });
+}
+
+async function checkApiServer(baseUrl) {
+    try {
+        await axios.get(`${baseUrl}/health`, { timeout: 4000 });
+        return true;
+    } catch (err) {
+        debugLog(`API health check failed: ${err.message}`);
+        renderBox("connection error", [`Cannot reach ${baseUrl}`, "Check the server is running and the URL is correct.", "", `${C.dim}You can change the API URL in settings.${C.reset}`], C.red);
+        return false;
+    }
+}
+
+class ApiProvider {
+    constructor(baseUrl, name) {
+        this.baseUrl = baseUrl;
+        this.name = name;
+    }
+
+    async search(query, dub = false) {
+        try {
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/search`, {
+                params: { q: query, dub: dub.toString() },
+                timeout: 15000
+            });
+            return response.data;
+        } catch (err) {
+            debugLog(`API error for ${this.name}.search:`, err.message);
+            return [];
+        }
+    }
+
+    async findEpisodes(seriesUrl) {
+        try {
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/episodes`, {
+                params: { url: seriesUrl },
+                timeout: 15000
+            });
+            let data = response.data;
+            if (data && typeof data === 'object') {
+                if (Array.isArray(data)) return data;
+                const arrayKeys = ['episodes', 'data', 'results', 'list', 'items', 'episodeList', 'episode_list', 'eps', 'content', 'records', 'payload'];
+                for (const key of arrayKeys) {
+                    if (data[key] && Array.isArray(data[key]) && data[key].length > 0) return data[key];
+                }
+                for (const val of Object.values(data)) {
+                    if (Array.isArray(val) && val.length > 0) return val;
+                }
+            }
+            return [];
+        } catch (err) {
+            debugLog(`API error for ${this.name}.findEpisodes:`, err.message);
+            return [];
+        }
+    }
+
+    async findAvailableServers(dataIds, audio) {
+        try {
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/servers`, {
+                params: { dataIds, audio },
+                timeout: 15000
+            });
+            return response.data;
+        } catch (err) {
+            debugLog(`API error for ${this.name}.findAvailableServers:`, err.message);
+            return [];
+        }
+    }
+
+    async extractStreamFromLinkId(linkId) {
+        try {
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/stream`, {
+                params: { linkId },
+                timeout: 30000
+            });
+            const stream = response.data;
+            if (stream && !stream.file && stream.url) stream.file = stream.url;
+            if (stream.tracks && Array.isArray(stream.tracks)) {
+                for (const track of stream.tracks) {
+                    if (!track.file && track.url) track.file = track.url;
+                }
+            }
+            if (stream.qualities && Array.isArray(stream.qualities) && stream.qualities.length > 0) {
+                stream.qualities = stream.qualities.map(q => typeof q === 'string' ? q : q.label || q.quality || 'unknown');
+            }
+            return stream;
+        } catch (err) {
+            debugLog(`API error for ${this.name}.extractStreamFromLinkId:`, err.message);
+            throw new Error(`Failed to extract stream: ${err.message}`);
+        }
+    }
+}
+
+async function fetchProviderList(apiBaseUrl) {
+    try {
+        const response = await axios.get(`${apiBaseUrl}/status`, { timeout: 5000 });
+        const providers = response.data.providers || [];
+        return providers.filter(p => p.online).map(p => p.name);
+    } catch (err) {
+        debugLog("Failed to fetch provider list from API, using fallback list.");
+        return ["Miruro", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
+    }
+}
+
+async function createProviders(apiBaseUrl) {
+    const providerNames = await fetchProviderList(apiBaseUrl);
+    return providerNames.map(name => new ApiProvider(apiBaseUrl, name));
+}
+
+async function selectServerTwoStep(providerServersMap, audioLabelText, statusBar) {
+    if (providerServersMap.size === 0) return null;
+    const providerEntries = Array.from(providerServersMap.entries());
+    const providerOptions = providerEntries.map(([prov, servers]) => `${C.bold}${prov.name}${C.reset}  ${C.dim}${servers.length} server${servers.length !== 1 ? 's' : ''}${C.reset}`);
+    const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ Select source${C.reset}  ${C.dim}(${audioLabelText})${C.reset}`, { allowBack: true, statusBar });
+    if (providerIdx < 0) return null;
+    const [selectedProvider, servers] = providerEntries[providerIdx];
+    const serverOptions = servers.map(s => s.name);
+    const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedProvider.name}${C.reset}  ${C.dim}Select server${C.reset}`, { allowBack: true, statusBar });
+    if (serverIdx < 0) return null;
+    return { provider: selectedProvider, serverId: servers[serverIdx].id, serverName: servers[serverIdx].name };
+}
+
+// FIXED: Safe episode selection with bounds checking for progress bar
+async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBar, titleMap = new Map(), seasonInfo = null) {
+    const watchInfo = getWatchlistInfo(title);
+    const lastWatched = watchInfo ? watchInfo.lastEpisode : 0;
+    const effectiveTotal = totalEpisodes || watchInfo?.totalEpisodes || null;
+    const episodeOptions = [];
+    for (let i = 1; i <= maxEpNum; i++) {
+        let denominator = effectiveTotal ? `${C.dim}/${effectiveTotal}${C.reset}` : `${C.dim}/?${C.reset}`;
+        let episodeNum = `${C.bold}${C.cyan}EP ${String(i).padStart(2, '0')}${C.reset}`;
+        let label = `${episodeNum}${denominator}`;
+
+        if (effectiveTotal && effectiveTotal > 0) {
+            const percent = Math.min(100, Math.max(0, Math.round((i / effectiveTotal) * 100)));
+            const filled = Math.min(8, Math.max(0, Math.round(percent / 12.5)));
+            const minibar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 8 - filled))}${C.reset}`;
+            label += `  [${minibar}] ${C.dim}${percent.toString().padStart(3)}%${C.reset}`;
+        }
+
+        const epTitle = titleMap.get(i);
+        if (epTitle && epTitle.trim()) {
+            const maxTitleLen = 42;
+            let displayTitle = epTitle;
+            if (displayTitle.length > maxTitleLen) {
+                displayTitle = displayTitle.slice(0, maxTitleLen - 1) + '…';
+            }
+            label += `  ${C.yellow}✦ ${displayTitle}${C.reset}`;
+        }
+
+        let marker = "";
+        if (i <= lastWatched) marker = `${C.green}✓${C.reset}`;
+        else if (i === lastWatched + 1) marker = `${C.yellow}▶${C.reset}`;
+        else marker = `${C.dim}·${C.reset}`;
+
+        episodeOptions.push(`${marker}  ${label}`);
+    }
+
+    let headerText = `\n  ${C.bold}${C.cyan}◈ Episode Select${C.reset}  ${C.dim}${maxEpNum} episodes${C.reset}`;
+    if (seasonInfo && (seasonInfo.season || seasonInfo.seasonYear)) {
+        const seasonDisplay = [];
+        if (seasonInfo.season) {
+            const seasonMap = { winter: '❄️ Winter', spring: '🌸 Spring', summer: '☀️ Summer', fall: '🍂 Fall' };
+            const seasonName = seasonMap[seasonInfo.season.toLowerCase()] || seasonInfo.season;
+            seasonDisplay.push(`${C.cyan}${seasonName}${C.reset}`);
+        }
+        if (seasonInfo.seasonYear) seasonDisplay.push(`${C.bold}${seasonInfo.seasonYear}${C.reset}`);
+        headerText += `  ${C.dim}•${C.reset}  ${seasonDisplay.join(' ')}`;
+    }
+    const pickedEpIdx = await selectMenuOption(episodeOptions, headerText, { allowBack: true, statusBar });
+    return pickedEpIdx >= 0 ? pickedEpIdx + 1 : -1;
+}
+
+async function showMetadataPanel(title) {
+    console.log(`\n  ${C.dim}Fetching metadata for${C.reset} ${C.bold}"${title}"${C.reset}...`);
+    const metadata = await fetchAnimeMetadata(title);
+    if (metadata) {
+        const content = [];
+
+        const seasonMapEmoji = { winter: '❄️', spring: '🌸', summer: '☀️', fall: '🍂' };
+        const seasonEmoji = metadata.season ? seasonMapEmoji[metadata.season.toLowerCase()] || '📺' : '📺';
+
+        if (metadata.rating) {
+            const filled = Math.min(5, Math.max(0, Math.round(metadata.rating / 2)));
+            const stars = `${C.yellow}${'★'.repeat(filled)}${C.reset}${C.dim}${'☆'.repeat(Math.max(0, 5 - filled))}${C.reset}`;
+            content.push(`${stars}  ${C.bold}${metadata.rating}${C.reset}${C.dim}/10${C.reset}`);
+            content.push('');
+        }
+
+        const seasonInfo = [];
+        if (metadata.season) seasonInfo.push(`${seasonEmoji} ${C.cyan}${metadata.season.charAt(0).toUpperCase() + metadata.season.slice(1)}${C.reset}`);
+        if (metadata.seasonYear) seasonInfo.push(`${C.bold}${metadata.seasonYear}${C.reset}`);
+        if (seasonInfo.length > 0) content.push(`${C.dim}Season${C.reset}   ${seasonInfo.join(' ')}`);
+
+        if (metadata.genres && metadata.genres.length) {
+            const genreStr = metadata.genres.slice(0, 6).map(g => `${C.cyan}${g}${C.reset}`).join(`  ${C.dim}•${C.reset}  `);
+            content.push(`${C.dim}Genres${C.reset}   ${genreStr}`);
+        }
+
+        const epStatusLine = [];
+        if (metadata.episodes) epStatusLine.push(`${C.bold}${metadata.episodes}${C.reset} episodes`);
+        if (metadata.status) epStatusLine.push(`${C.yellow}${metadata.status}${C.reset}`);
+        if (epStatusLine.length > 0) content.push(`${C.dim}Info${C.reset}     ${epStatusLine.join(`  ${C.dim}•${C.reset}  `)}`);
+
+        if (metadata.synopsis) {
+            content.push('');
+            const cleanSynopsis = stripHtmlTags(metadata.synopsis);
+            const words = cleanSynopsis.split(' ');
+            let line = '';
+            for (const word of words) {
+                if ((line + ' ' + word).length <= 70) line += (line ? ' ' : '') + word;
+                else { content.push(`  ${C.dim}${line}${C.reset}`); line = word; }
+            }
+            if (line) content.push(`  ${C.dim}${line}${C.reset}`);
+        }
+        renderBox(`${seasonEmoji} ${title}`, content, C.green);
+    } else {
+        renderBox("Info", [`No metadata found for "${title}".`], C.dim);
+    }
+    console.log(`\n  ${C.dim}1 continue  2 back${C.reset}`);
+    const answer = await askQuestion(`\n  ${C.bold}${C.yellow}›${C.reset} `);
+    return answer.trim() === '1' ? metadata : null;
+}
+
+async function triggerSearchWorkflow(initialQuery, providersList) {
+    if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
+    clearScreen();
+    renderHeader("SEARCH", `${providersList.length} providers ready`);
+    const query = initialQuery ?? await askQuestion(`\n  ${C.bold}${C.yellow}Search:${C.reset} `);
+    const payload = query.trim();
+    if (!payload) return;
+    saveSearchToHistory(payload);
+
+    const settings = loadSettings();
+    let globalResults;
+    const cacheKey = `search:${payload}:${settings.defaultAudio}`;
+    cleanCache(searchCache, settings.cacheMaxSize, settings.cacheTTL);
+    if (searchCache.has(cacheKey) && (Date.now() - searchCache.get(cacheKey).timestamp) < settings.cacheTTL) {
+        globalResults = searchCache.get(cacheKey).data;
+        console.log(`  ${C.dim}Using cached results${C.reset}`);
+    } else {
+        globalResults = await withSpinner(`Searching across ${providersList.length} providers...`, async () => {
+            const results = await Promise.all(providersList.map(async (prov) => {
+                try { const hits = await prov.search(payload, settings.defaultAudio === 'dub'); return Array.isArray(hits) ? hits.map(item => ({ provider: prov, item })) : []; } catch(e) { return []; }
+            }));
+            return results.flat();
+        });
+        searchCache.set(cacheKey, { data: globalResults, timestamp: Date.now() });
+    }
+
+    let flattenedMatches = globalResults.map(match => ({ ...match, score: 0 }));
+    if (!flattenedMatches.length) { renderBox("No Results", [`Nothing found for "${payload}"`], C.red); await wait(1500); return; }
+    
+    const normalizedQuery = payload.toLowerCase();
+    flattenedMatches = flattenedMatches.map(match => {
+        let cleanTitle = match.item.title.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+        match.item.title = cleanTitle;
+        const similarity = similarityScore(cleanTitle, normalizedQuery);
+        let score = Math.floor(similarity * 100);
+        if (cleanTitle.toLowerCase() === normalizedQuery) score = 100;
+        return { ...match, score };
+    }).filter(match => match.score > settings.minSimilarityScore);
+    
+    if (!flattenedMatches.length) { renderBox("No Close Matches", [`No close matches for "${payload}"`], C.red); await wait(1500); return; }
+    
+    const groupedMap = {};
+    flattenedMatches.forEach(match => { const normalizedKey = match.item.title.toLowerCase(); if (!groupedMap[normalizedKey]) groupedMap[normalizedKey] = []; groupedMap[normalizedKey].push(match); });
+    const groupEntries = Object.entries(groupedMap).map(([key, matches]) => ({ key, matches, maxScore: Math.max(...matches.map(m => m.score)) }));
+    groupEntries.sort((a, b) => b.maxScore - a.maxScore);
+    const topGroups = groupEntries.slice(0, 50);
+    
+    const showSelectionStrings = topGroups.map(({ key, matches }) => {
+        const item = matches[0].item;
+        const uniqueEngines = Array.from(new Set(matches.map(i => i.provider.name)));
+        const audioFlags = audioLabel(matches.some(i => i.item.hasSub), matches.some(i => i.item.hasDub));
+        const sourceLabel = uniqueEngines.length === 1 ? uniqueEngines[0] : `${uniqueEngines.length} sources`;
+        const score = Math.max(...matches.map(m => m.score));
+        const scoreBar = score >= 90 ? `${C.green}${score}%${C.reset}` : score >= 70 ? `${C.yellow}${score}%${C.reset}` : `${C.dim}${score}%${C.reset}`;
+        return `${padRightVisible(item.title, 44)} ${C.cyan}${audioFlags}${C.reset}  ${C.dim}${sourceLabel}${C.reset}  ${scoreBar}`;
+    });
+    
+    const idx = await selectMenuOption(showSelectionStrings, `\n  ${C.bold}${C.cyan}◈ Results for${C.reset} ${C.bold}"${payload}"${C.reset}`, { allowBack: true, statusBar: { providersCount: providersList.length, apiUrl: loadSettings().apiBaseUrl } });
+    if (idx >= 0 && idx < topGroups.length) {
+        const selectedGroup = topGroups[idx];
+        const selectedTitle = selectedGroup.matches[0].item.title;
+        let finalMatches = selectedGroup.matches;
+        if (selectedGroup.matches.length > 1) {
+            const providerOptions = selectedGroup.matches.map(m => {
+                const audioFlags = audioLabel(m.item.hasSub, m.item.hasDub);
+                return `${C.bold}${m.provider.name}${C.reset}  ${C.dim}${audioFlags}${C.reset}`;
+            });
+            const chosenProvIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ Pick source${C.reset}  ${C.dim}${selectedTitle}${C.reset}`, { allowBack: true });
+            if (chosenProvIdx < 0) return;
+            finalMatches = [selectedGroup.matches[chosenProvIdx]];
+        }
+        const showMeta = await selectMenuOption(["View anime details", "Go to episodes"], `\n  ${C.bold}${C.cyan}◈ ${selectedTitle}${C.reset}`, { allowBack: true });
+        if (showMeta === 0) { const metadata = await showMetadataPanel(selectedTitle); if (!metadata) return; }
+        else if (showMeta < 0) return;
+        await handleAnimeSelection(finalMatches);
+    }
+}
+
+async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudio) {
+    const settings = loadSettings();
+    const coreTitle = selectedMatches[0]?.item.title || "Selected Anime";
+    const providersList = await createProviders(settings.apiBaseUrl);
+    const statusBar = { providersCount: providersList.length, apiUrl: settings.apiBaseUrl };
+    const hasSub = selectedMatches.some(m => m.item.hasSub);
+    const hasDub = selectedMatches.some(m => m.item.hasDub);
+    let audio = lockedAudio || settings.defaultAudio;
+    
+    if (!lockedAudio && hasSub && hasDub) {
+        const audioIdx = await selectMenuOption([`${C.cyan}SUB${C.reset}  Subtitled`, `${C.magenta}DUB${C.reset}  Dubbed`], `\n  ${C.bold}${C.cyan}◈ Audio track${C.reset}`, { allowBack: true, statusBar });
+        if (audioIdx === 1) audio = "dub";
+        else if (audioIdx < 0) return;
+    } else if (!lockedAudio && !hasSub && hasDub) audio = "dub";
+    else if (!lockedAudio && hasSub && !hasDub) audio = "sub";
+
+    let isDownloadMode = false, isBatchMode = false;
+    const actionIdx = await selectMenuOption(["▶ Stream", "↓ Download single", "↓↓ Batch download"], `\n  ${C.bold}${C.cyan}◈ Action${C.reset}`, { allowBack: true, statusBar });
+    if (actionIdx < 0) return;
+    switch (actionIdx) {
+        case 0: isDownloadMode = false; break;
+        case 1: isDownloadMode = true; break;
+        case 2: isDownloadMode = true; isBatchMode = true; break;
+    }
+
+    const cacheKey = `${coreTitle}|${selectedMatches.map(m => m.provider.name).join(',')}`;
+    cleanCache(episodeListCache, settings.cacheMaxSize, settings.cacheTTL);
+    let providerEpLists;
+    if (episodeListCache.has(cacheKey)) {
+        providerEpLists = episodeListCache.get(cacheKey).data;
+        console.log(`  ${C.dim}Using cached episode list${C.reset}`);
+    } else {
+        try {
+            providerEpLists = await withRetry(async () => {
+                const lists = await Promise.all(selectedMatches.map(async (m) => {
+                    try { const list = await m.provider.findEpisodes(m.item.url); return { provider: m.provider, list: Array.isArray(list) ? list : [] }; } catch(e) { return { provider: m.provider, list: [] }; }
+                }));
+                return lists;
+            }, settings.maxRetries);
+            episodeListCache.set(cacheKey, { data: providerEpLists, timestamp: Date.now() });
+        } catch (err) { console.log(`  ${C.red}✗ Failed to fetch episodes${C.reset}`); return; }
+    }
+    
+    const validLists = providerEpLists.filter(p => p.list && p.list.length > 0);
+    if (!validLists.length) { renderBox("No Episodes", ["No episodes returned from any provider."], C.red); await wait(2000); return; }
+    
+    let maxEpNum = 0;
+    for (const p of validLists) for (const ep of p.list) { const num = parseEpisodeNumber(ep); if (num && num > maxEpNum) maxEpNum = num; }
+    if (maxEpNum === 0) { renderBox("Error", ["Invalid episode numbers."], C.red); await wait(1500); return; }
+
+    const watchInfo = getWatchlistInfo(coreTitle);
+    let effectiveTotalEpisodes = watchInfo?.totalEpisodes ?? null;
+    let anilistIdForWorker = watchInfo?.anilistId ?? undefined;
+    let seasonInfo = { season: null, seasonYear: null };
+
+    if (!effectiveTotalEpisodes) {
+        const totalData = await fetchTotalEpisodesFromWorker(coreTitle, anilistIdForWorker, settings.apiBaseUrl);
+        if (totalData && totalData.totalEpisodes !== undefined && totalData.totalEpisodes !== null) { effectiveTotalEpisodes = totalData.totalEpisodes; anilistIdForWorker = totalData.anilistId || undefined; }
+    }
+
+    if (anilistIdForWorker && !seasonInfo.season) {
+        const metaData = await fetchAnimeMetadata(coreTitle);
+        if (metaData) seasonInfo = { season: metaData.season, seasonYear: metaData.seasonYear };
+    }
+
+    const titleMap = new Map();
+    for (const ep of validLists.flatMap(p => p.list)) { const num = parseEpisodeNumber(ep); if (num && ep.title) titleMap.set(num, ep.title); }
+
+    let anilistTitles = {};
+    if (anilistIdForWorker) {
+        console.log(`  ${C.dim}Fetching episode titles from AniList...${C.reset}`);
+        anilistTitles = await fetchAnilistEpisodeTitles(anilistIdForWorker);
+        for (const [epNum, title] of Object.entries(anilistTitles)) {
+            if (title && !titleMap.has(parseInt(epNum, 10))) {
+                titleMap.set(parseInt(epNum, 10), title);
+            }
+        }
+    }
+
+    let targetEpisode = startingEpisode || 1;
+    if (!startingEpisode && !isBatchMode) {
+        const picked = await selectEpisodeWithMarkers(maxEpNum, effectiveTotalEpisodes, coreTitle, statusBar, titleMap, seasonInfo);
+        if (picked === -1) return;
+        targetEpisode = picked;
+    }
+
+    if (isDownloadMode && isBatchMode) {
+        const start = await askNumber(`\n  ${C.yellow}Start episode (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
+        const end = await askNumber(`  ${C.yellow}End episode (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
+        const sampleProviderServersMap = new Map();
+        for (const p of validLists) {
+            const epObj = p.list.find(e => parseEpisodeNumber(e) === start);
+            const dataIds = resolveEpisodeDataIds(epObj);
+            if (dataIds) {
+                try { const servers = await p.provider.findAvailableServers(dataIds, audio); if (servers.length) sampleProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
+            }
+        }
+        if (sampleProviderServersMap.size === 0) { renderBox("Error", [`No servers for episode ${start}`], C.red); await wait(1500); return; }
+        const selection = await selectServerTwoStep(sampleProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
+        if (!selection) return;
+        const { provider: selectedProvider, serverId } = selection;
+
+        let selectedQuality = null;
+        const sampleStream = await withSpinner(`Fetching stream info for quality selection...`, async () => await selectedProvider.extractStreamFromLinkId(serverId));
+        if (sampleStream.qualities && sampleStream.qualities.length > 1) {
+            const qualityOptions = sampleStream.qualities.map(q => `${q}`);
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            if (qualityIdx >= 0) selectedQuality = sampleStream.qualities[qualityIdx];
+        }
+
+        const jobs = [];
+        for (let ep = start; ep <= end; ep++) jobs.push({ episode: ep, title: titleMap.get(ep) || `Episode ${ep}`, provider: selectedProvider, serverId, serverName: selection.serverName, audio });
+        await batchDownloadQueue(jobs, coreTitle, statusBar, selectedQuality);
+        return;
+    }
+
+    if (isDownloadMode) {
+        const downloadProviderServersMap = new Map();
+        for (const p of validLists) {
+            const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
+            const dataIds = resolveEpisodeDataIds(epObj);
+            if (dataIds) {
+                try { const servers = await p.provider.findAvailableServers(dataIds, audio); if (servers.length) downloadProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
+            }
+        }
+        if (downloadProviderServersMap.size === 0) { renderBox("Error", ["No download links found."], C.red); await wait(1500); return; }
+        const selection = await selectServerTwoStep(downloadProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
+        if (!selection) return;
+        const stream = await withSpinner(`Fetching stream from ${selection.provider.name}...`, async () => await selection.provider.extractStreamFromLinkId(selection.serverId));
+        if (stream && !stream.file && stream.url) stream.file = stream.url;
+
+        let selectedQuality = null;
+        if (stream.qualities && stream.qualities.length > 1) {
+            const qualityOptions = stream.qualities.map(q => `${q}`);
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            if (qualityIdx >= 0) {
+                selectedQuality = stream.qualities[qualityIdx];
+                if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                    stream.file = stream.qualityUrls[selectedQuality];
+                    console.log(`  ${C.dim}Selected quality: ${selectedQuality}${C.reset}`);
+                }
+            }
+        }
+
+        const ext = settings.downloadFormat;
+        const filename = `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${ext}`;
+        await resumeableDownload(stream, filename, null, ext);
+        return;
+    }
+
+    let userWantsToContinue = true, preferredProviderName = null, preferredServerName = null, currentAudio = audio;
+    while (targetEpisode <= maxEpNum && userWantsToContinue) {
+        const providerServersMap = new Map();
+        for (const p of validLists) {
+            const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
+            const dataIds = resolveEpisodeDataIds(epObj);
+            if (dataIds) {
+                try { const servers = await p.provider.findAvailableServers(dataIds, currentAudio); if (servers.length) providerServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
+            }
+        }
+        if (providerServersMap.size === 0) { renderBox("Error", [`No servers for episode ${targetEpisode}`], C.red); break; }
+        
+        let selectedProvider = null, selectedServerId = null, selectedServerName = null;
+        if (preferredProviderName && preferredServerName) {
+            for (const [prov, servers] of providerServersMap.entries()) {
+                if (prov.name === preferredProviderName) { const matchedServer = servers.find(s => s.name === preferredServerName); if (matchedServer) { selectedProvider = prov; selectedServerId = matchedServer.id; selectedServerName = matchedServer.name; break; } }
+            }
+            if (!selectedProvider) console.log(`  ${C.yellow}⚠ Preferred server unavailable — reselecting${C.reset}`);
+        }
+        if (!selectedProvider) {
+            const selection = await selectServerTwoStep(providerServersMap, currentAudio === "sub" ? "SUB" : "DUB", statusBar);
+            if (!selection) { userWantsToContinue = false; break; }
+            selectedProvider = selection.provider; selectedServerId = selection.serverId; selectedServerName = selection.serverName;
+            preferredProviderName = selectedProvider.name; preferredServerName = selectedServerName;
+        }
+        if (!selectedProvider || !selectedServerId) { renderBox("Error", ["No server selected."], C.red); break; }
+        
+        try {
+            let stream = await withSpinner(`Fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));
+            if (!stream?.file && !stream?.url) throw new Error("No video file");
+            if (stream && !stream.file && stream.url) stream.file = stream.url;
+            
+            let selectedQuality = null;
+            if (stream.qualities && stream.qualities.length > 1) {
+                const preferredQual = watchInfo?.quality || settings.preferredQuality;
+                selectedQuality = selectQuality(stream.qualities, preferredQual);
+                if (selectedQuality && selectedQuality !== stream.file) {
+                    if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                        stream.file = stream.qualityUrls[selectedQuality];
+                        console.log(`  ${C.dim}Selected quality: ${selectedQuality}${C.reset}`);
+                    } else { console.log(`  ${C.yellow}⚠ Quality selection not supported by this stream${C.reset}`); }
+                }
+            }
+            
+            if (stream.tracks && stream.tracks.length > 0) {
+                const subChoice = await selectMenuOption(["Download subtitles", "Skip"], `\n  ${C.bold}Subtitles available${C.reset}`, { allowBack: false });
+                if (subChoice === 0) {
+                    for (const sub of stream.tracks) {
+                        const subUrl = sub.file || sub.url;
+                        if (!subUrl) continue;
+                        let ext = '.srt';
+                        if (subUrl) { const match = subUrl.match(/\.(vtt|ass|srt)(\?|$)/i); if (match) ext = '.' + match[1].toLowerCase(); }
+                        const subPath = path.join(process.cwd(), `${coreTitle} - Episode ${targetEpisode} (${currentAudio.toUpperCase()}).${sub.label || sub.lang || 'sub'}${ext}`);
+                        await downloadSubtitle(subUrl, subPath);
+                        console.log(`  ${C.green}✓ Subtitle saved: ${subPath}${C.reset}`);
+                    }
+                }
+            }
+            
+            const episodeNumStr = String(targetEpisode).padStart(2, '0');
+            const epTitle = titleMap.get(targetEpisode);
+            let seasonPrefix = '';
+            if (seasonInfo.season) {
+                const seasonNum = seasonInfo.season === 'winter' ? 1 : seasonInfo.season === 'spring' ? 2 : seasonInfo.season === 'summer' ? 3 : seasonInfo.season === 'fall' ? 4 : 1;
+                seasonPrefix = `${C.bold}${C.cyan}S${seasonNum}E${episodeNumStr}${C.reset}`;
+            }
+
+            const episodeDisplay = effectiveTotalEpisodes ? `${C.dim}${targetEpisode}/${effectiveTotalEpisodes}${C.reset}` : `${C.dim}${targetEpisode}/?${C.reset}`;
+            const audioTag = currentAudio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
+            const qualityTag = selectedQuality ? `${C.magenta}${selectedQuality}${C.reset}` : '';
+            const speedInfo = `${C.dim}${settings.playbackSpeed}x${C.reset}`;
+
+            const boxContent = [
+                `${C.bold}${C.green}${coreTitle}${C.reset}`,
+            ];
+
+            if (seasonPrefix) {
+                boxContent.push(`${seasonPrefix}  ${episodeDisplay}`);
+            } else {
+                boxContent.push(`${C.bold}Episode ${episodeNumStr}${C.reset}  ${episodeDisplay}`);
+            }
+
+            if (epTitle && epTitle.trim()) {
+                const titleText = epTitle.length > 70 ? epTitle.slice(0, 67) + '…' : epTitle;
+                boxContent.push(`${C.yellow}${titleText}${C.reset}`);
+            }
+
+            const infoParts = [selectedProvider.name, selectedServerName, audioTag];
+            if (qualityTag) infoParts.push(qualityTag);
+            infoParts.push(speedInfo);
+            boxContent.push(`${C.dim}${infoParts.join(`  ${C.dim}·${C.reset}  `)}${C.reset}`);
+
+            renderBox("▶ Now Playing", boxContent, C.green);
+            
+            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality, seasonInfo);
+            await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio, selectedProvider.name, selectedServerName);
+            
+            if (targetEpisode < maxEpNum) {
+                console.log(`\n  ${C.green}✓ Episode ${targetEpisode} done${C.reset}`);
+                const nextTitle = titleMap.get(targetEpisode + 1) || "";
+                const result = await bingeCountdownWithProgress(settings.bingeCountdownSeconds, targetEpisode + 1, currentAudio, nextTitle, () => { const newAudio = currentAudio === "sub" ? "dub" : "sub"; updateWatchlistAudio(coreTitle, newAudio); }, settings.autoPlayNext);
+                if (result.continue) {
+                    if (result.newAudio) { currentAudio = result.newAudio; console.log(`  ${C.yellow}◈ Switched to ${currentAudio.toUpperCase()}${C.reset}`); }
+                    targetEpisode++;
+                } else { userWantsToContinue = false; }
+            } else { console.log(`  ${C.green}✓ Finished last episode!${C.reset}`); break; }
+        } catch (err) {
+            if (settings.autoRetryFailed) {
+                console.log(`  ${C.yellow}⚠ Retrying episode ${targetEpisode}...${C.reset}`);
+                await wait(2000);
+                continue;
+            }
+            renderBox("Playback Error", [err.message || err], C.red);
+            await wait(2000);
+            break;
+        }
+    }
+    console.log(`  ${C.dim}Session ended.${C.reset}`);
+}
+
+async function triggerQuickResume(providersList) {
+    const list = loadWatchlist();
+    if (list.length === 0) { renderBox("Info", ["Watchlist is empty. Nothing to resume."], C.dim); await wait(1200); return; }
+    const last = list[0];
+    const mappedMatches = [];
+    for (const match of last.matches) {
+        const foundProvider = providersList.find(p => p.name === match.providerName);
+        if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: last.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
+    }
+    if (mappedMatches.length === 0) { renderBox("Error", ["Cannot restore provider data for last watch."], C.red); await wait(1500); return; }
+    await handleAnimeSelection(mappedMatches, last.lastEpisode + 1, last.audio);
+}
+
+async function triggerRecentSearchesWorkflow(providersList) {
+    const history = loadSearchHistory();
+    if (history.length === 0) {
+        clearScreen();
+        renderHeader("RECENT SEARCHES", "");
+        renderBox("Info", ["No searches saved yet."], C.dim);
+        await pauseForKey();
+        return;
+    }
+    const options = [...history.map((query, idx) => `${padRightVisible(query, 48)} ${C.dim}#${idx + 1}${C.reset}`), `${C.dim}Clear all${C.reset}`, `${C.dim}Go back${C.reset}`];
+    const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ Recent searches${C.reset}`, { allowBack: true });
+    if (selectedIdx < 0 || selectedIdx === history.length + 1) return;
+    if (selectedIdx === history.length) {
+        const confirm = await selectMenuOption(["Yes, clear all", "No, go back"], `\n  ${C.bold}${C.red}Clear all recent searches?${C.reset}`, { allowBack: true });
+        if (confirm === 0) { clearSearchHistory(); renderBox("Done", ["Searches cleared."], C.green); }
+        await wait(1000);
+        return;
+    }
+    const selectedQuery = history[selectedIdx];
+    const actionOptions = [`Search "${selectedQuery}"`, `Delete this entry`, `Go back`];
+    const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedQuery}${C.reset}`, { allowBack: true });
+    switch (actionIdx) {
+        case 0: await triggerSearchWorkflow(selectedQuery, providersList); break;
+        case 1: deleteSearchHistoryItem(selectedIdx); renderBox("Done", ["Search deleted."], C.green); await wait(800); break;
+    }
+}
+
+async function triggerWatchlistWorkflow(providersList) {
+    if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
+    const list = loadWatchlist();
+    if (list.length === 0) {
+        clearScreen();
+        renderHeader("WATCHLIST", "");
+        renderBox("Info", ["Watchlist is empty.", "Start watching to build your history."], C.dim);
+        await wait(2000);
+        return;
+    }
+    const options = list.map((item) => {
+        const epStr = String(item.lastEpisode).padStart(2, '0');
+        let epDisplay = `${C.bold}E${epStr}${C.reset}`;
+
+        if (item.season) {
+            const seasonMap = { winter: '❄️', spring: '🌸', summer: '☀️', fall: '🍂' };
+            const seasonEmoji = seasonMap[item.season.toLowerCase()] || '📺';
+            epDisplay = `${seasonEmoji} ${C.bold}S${epStr}${C.reset}`;
+            if (item.seasonYear) {
+                epDisplay += ` ${C.dim}(${item.seasonYear})${C.reset}`;
+            }
+        }
+
+        if (item.totalEpisodes) {
+            epDisplay += `${C.dim}/${item.totalEpisodes}${C.reset}`;
+        } else {
+            epDisplay += `${C.dim}/?${C.reset}`;
+        }
+
+        const audioTag = item.audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
+        const dateStr = item.lastWatched ? new Date(item.lastWatched).toLocaleDateString() : item.timestamp?.split('T')[0] || '';
+        const progressPercent = item.totalEpisodes ? Math.round((item.lastEpisode / item.totalEpisodes) * 100) : 0;
+        const progressBar = progressPercent > 0 ? ` ${C.dim}[${Math.round(progressPercent / 20)}█]${C.reset}` : '';
+
+        return `${padRightVisible(item.title, 35)}  ${epDisplay}  ${audioTag}${progressBar}  ${C.dim}${dateStr}${C.reset}`;
+    });
+    options.push(`${C.dim}Clear watchlist${C.reset}`, `${C.dim}Go back${C.reset}`);
+    const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ Watchlist${C.reset}`, { allowBack: true });
+    if (selectedIdx < 0) return;
+    if (selectedIdx === list.length) {
+        const confirm = await selectMenuOption(["Yes, clear all", "No, go back"], `\n  ${C.bold}${C.red}Clear entire watchlist?${C.reset}`, { allowBack: true });
+        if (confirm === 0) { clearWatchlist(); renderBox("Done", ["Watchlist cleared."], C.green); }
+        await wait(1200);
+        return;
+    }
+    if (selectedIdx === list.length + 1) return;
+    const targetItem = list[selectedIdx];
+    const nextEpNum = targetItem.lastEpisode + 1;
+    const nextEpStr = String(nextEpNum).padStart(2, '0');
+    const lastEpStr = String(targetItem.lastEpisode).padStart(2, '0');
+    const totalHint = targetItem.totalEpisodes ? `/${targetItem.totalEpisodes}` : '/?';
+    const actionOptions = [
+        `▶ Resume E${nextEpStr}${totalHint}`,
+        `↺ Replay E${lastEpStr}${totalHint}`,
+        `⏮ Start from E01`,
+        `✎ Edit progress`,
+        `◈ Toggle audio (${targetItem.audio.toUpperCase()})`,
+        `✓ Mark completed`,
+        `○ Mark unwatched`,
+        `⟳ Refresh total episodes`,
+        `✕ Remove from watchlist`,
+        `← Go back`
+    ];
+    const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${targetItem.title}${C.reset}`, { allowBack: true });
+    if (actionIdx < 0 || actionIdx === actionOptions.length - 1) return;
+    switch (actionIdx) {
+        case 7:
+            const totalData = await fetchTotalEpisodesFromWorker(targetItem.title, targetItem.anilistId, loadSettings().apiBaseUrl);
+            if (totalData && totalData.totalEpisodes !== null) {
+                const idx = list.findIndex(item => item.title.toLowerCase() === targetItem.title.toLowerCase());
+                if (idx !== -1) {
+                    list[idx].totalEpisodes = totalData.totalEpisodes;
+                    if (totalData.anilistId) list[idx].anilistId = totalData.anilistId;
+                    saveWatchlist(list);
+                    renderBox("Updated", [`Total episodes set to ${totalData.totalEpisodes}`], C.green);
+                } else { renderBox("Error", ["Entry not found."], C.red); }
+            } else { renderBox("Error", ["Could not fetch total episodes."], C.red); }
+            await wait(1200);
+            break;
+        case 8:
+            deleteWatchlistItem(selectedIdx);
+            renderBox("Done", ["Removed from watchlist."], C.green);
+            await wait(1000);
+            break;
+        case 4:
+            const newAudio = targetItem.audio === "sub" ? "dub" : "sub";
+            updateWatchlistAudio(targetItem.title, newAudio);
+            renderBox("Updated", [`Audio switched to ${newAudio.toUpperCase()}`], C.green);
+            await wait(1000);
+            break;
+        case 5:
+            if (targetItem.totalEpisodes && targetItem.totalEpisodes > 0) {
+                updateWatchlistEpisode(targetItem.title, targetItem.totalEpisodes);
+                renderBox("Done", [`${targetItem.title} marked as completed`], C.green);
+            } else {
+                const manualEp = await askNumber(`\n  ${C.yellow}Final episode number${C.reset}  ${C.bold}›${C.reset} `, 1, 9999);
+                updateWatchlistEpisode(targetItem.title, manualEp);
+                renderBox("Done", [`Last episode set to ${manualEp}`], C.green);
+            }
+            await wait(1200);
+            break;
+        case 6:
+            updateWatchlistEpisode(targetItem.title, 0);
+            renderBox("Updated", [`${targetItem.title} marked as unwatched`], C.green);
+            await wait(1000);
+            break;
+        case 3:
+            const newEp = await askNumber(`\n  ${C.yellow}New last watched episode (current: ${targetItem.lastEpisode})${C.reset}  ${C.bold}›${C.reset} `, 0, 9999);
+            updateWatchlistEpisode(targetItem.title, newEp);
+            renderBox("Updated", [`Episode progress → ${newEp}`], C.green);
+            await wait(1000);
+            break;
+        default:
+            const mappedMatches = [];
+            for (const match of targetItem.matches) {
+                const foundProvider = providersList.find(p => p.name === match.providerName);
+                if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: targetItem.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
+            }
+            if (mappedMatches.length === 0) { renderBox("Error", ["Failed to restore provider data."], C.red); await wait(1500); return; }
+            let startEpisode = 1;
+            if (actionIdx === 0) startEpisode = targetItem.lastEpisode + 1;
+            else if (actionIdx === 1) startEpisode = targetItem.lastEpisode;
+            else if (actionIdx === 2) startEpisode = 1;
+            await handleAnimeSelection(mappedMatches, startEpisode, targetItem.audio);
+            break;
+    }
+}
+
+async function triggerSettingsWorkflow(providersCount) {
+    while (true) {
+        const settings = loadSettings();
+        const options = [
+            `Binge delay       ${C.dim}${settings.bingeCountdownSeconds}s${C.reset}`,
+            `Default audio     ${C.dim}${settings.defaultAudio === "sub" ? "Subtitled" : "Dubbed"}${C.reset}`,
+            `Playback speed    ${C.dim}${settings.playbackSpeed}x${C.reset}`,
+            `Auto-play next    ${settings.autoPlayNext ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Resume playback   ${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Discord RPC       ${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Download dir      ${C.dim}${settings.downloadDir.length > 30 ? '...' + settings.downloadDir.slice(-27) : settings.downloadDir}${C.reset}`,
+            `Download format   ${C.dim}${settings.downloadFormat.toUpperCase()}${C.reset}`,
+            `API base URL      ${C.dim}${settings.apiBaseUrl}${C.reset}`,
+            `Min similarity    ${C.dim}${settings.minSimilarityScore}%${C.reset}`,
+            `Notifications     ${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Auto retry        ${settings.autoRetryFailed ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `Clear cache`,
+            `Reset all settings`,
+            `Go back`
+        ];
+        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ Settings${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
+        if (idx < 0 || idx === options.length - 1) return;
+        switch (idx) {
+            case 0:
+                const values = [3,5,8,10,15,20,30];
+                const valueIdx = await selectMenuOption(values.map(v => `${v}s`), `\n  ${C.bold}${C.cyan}Binge delay${C.reset}`, { allowBack: true });
+                if (valueIdx >= 0) { settings.bingeCountdownSeconds = values[valueIdx]; saveSettings(settings); }
+                break;
+            case 1:
+                const audioOpts = ["Subtitled (sub)", "Dubbed (dub)"];
+                const audioIdx = await selectMenuOption(audioOpts, `\n  ${C.bold}${C.cyan}Default audio${C.reset}`, { allowBack: true });
+                if (audioIdx >= 0) { settings.defaultAudio = audioIdx === 0 ? "sub" : "dub"; saveSettings(settings); }
+                break;
+            case 2:
+                const speeds = [0.75,1.0,1.25,1.5,1.75,2.0];
+                const speedIdx = await selectMenuOption(speeds.map(s => `${s}x`), `\n  ${C.bold}${C.cyan}Playback speed${C.reset}`, { allowBack: true });
+                if (speedIdx >= 0) { settings.playbackSpeed = speeds[speedIdx]; saveSettings(settings); }
+                break;
+            case 3:
+                settings.autoPlayNext = !settings.autoPlayNext;
+                saveSettings(settings);
+                renderBox("Updated", [`Auto-play next: ${settings.autoPlayNext ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 4:
+                settings.resumePlayback = !settings.resumePlayback;
+                saveSettings(settings);
+                renderBox("Updated", [`Resume playback: ${settings.resumePlayback ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 5:
+                settings.discordEnabled = !settings.discordEnabled;
+                if (settings.discordEnabled && !discordRpc) initDiscordRpc(settings.discordClientId);
+                else if (!settings.discordEnabled && discordRpc) { discordRpc.destroy().catch(() => {}); discordRpc = null; discordReady = false; }
+                saveSettings(settings);
+                renderBox("Updated", [`Discord RPC: ${settings.discordEnabled ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 6:
+                const newDir = await askQuestion(`\n  ${C.yellow}Download directory (full path)${C.reset}  ${C.bold}›${C.reset} `);
+                if (newDir.trim()) {
+                    const resolved = path.resolve(newDir.trim());
+                    if (!fs.existsSync(resolved)) try { fs.mkdirSync(resolved, { recursive: true }); } catch(e) {}
+                    if (fs.existsSync(resolved)) { settings.downloadDir = resolved; saveSettings(settings); renderBox("Saved", [`Download directory → ${settings.downloadDir}`], C.green); }
+                    else { renderBox("Error", ["Directory does not exist and could not be created."], C.red); }
+                    await wait(1200);
+                }
+                break;
+            case 7:
+                const formatOpts = ["MKV (mkv)", "MP4 (mp4)"];
+                const formatIdx = await selectMenuOption(formatOpts, `\n  ${C.bold}${C.cyan}Download format${C.reset}`, { allowBack: true });
+                if (formatIdx >= 0) { settings.downloadFormat = formatIdx === 0 ? "mkv" : "mp4"; saveSettings(settings); }
+                break;
+            case 8:
+                const newUrl = await askQuestion(`\n  ${C.yellow}API base URL${C.reset}  ${C.bold}›${C.reset} `);
+                if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("Saved", [`API URL → ${settings.apiBaseUrl}`], C.green); await wait(1200); }
+                break;
+            case 9:
+                const minScore = await askNumber(`\n  ${C.yellow}Minimum similarity score (1-100)${C.reset}  ${C.bold}›${C.reset} `, 1, 100);
+                settings.minSimilarityScore = minScore;
+                saveSettings(settings);
+                renderBox("Saved", [`Min similarity: ${settings.minSimilarityScore}%`], C.green);
+                await wait(1200);
+                break;
+            case 10:
+                settings.enableNotifications = !settings.enableNotifications;
+                saveSettings(settings);
+                renderBox("Updated", [`Notifications: ${settings.enableNotifications ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 11:
+                settings.autoRetryFailed = !settings.autoRetryFailed;
+                saveSettings(settings);
+                renderBox("Updated", [`Auto retry: ${settings.autoRetryFailed ? "ON" : "OFF"}`], C.green);
+                await wait(800);
+                break;
+            case 12:
+                clearAllCaches();
+                renderBox("Done", ["All caches cleared."], C.green);
+                await wait(1000);
+                break;
+            case 13:
+                saveSettings(defaultSettings);
+                clearAllCaches();
+                renderBox("Done", ["Settings reset to defaults."], C.green);
+                await wait(1200);
+                break;
+        }
+    }
+}
+
+async function triggerProviderOverviewWorkflow(providersList) {
+    if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
+    clearScreen();
+    renderHeader("PROVIDERS", `${providersList.length} sources`);
+    console.log();
+    providersList.forEach((provider, idx) => {
+        const num = String(idx + 1).padStart(2, "0");
+        console.log(`  ${C.dim}${num}${C.reset}  ${C.bold}${C.green}${provider.name}${C.reset}`);
+    });
+    console.log();
+    renderBox("Info", [
+        "All providers are searched in parallel.",
+        `API: ${loadSettings().apiBaseUrl}`
+    ], C.dim);
+    await pauseForKey();
+}
+
+if (process.argv.includes('--version') || process.argv.includes('-v')) { console.log(`kittycli v${APP_VERSION}`); process.exit(0); }
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(`kittycli v${APP_VERSION} — anime aggregator terminal client`);
+    console.log(''); console.log('Usage: kittycli [options]'); console.log('');
+    console.log('Options:');
+    console.log('  -v, --version   Show version');
+    console.log('  -h, --help      Show this help');
+    console.log('  --debug         Enable verbose logging');
+    console.log('');
+    console.log(`Data directory: ${DATA_DIR}`); process.exit(0);
+}
+
+async function terminalEngine() {
+    let settings = loadSettings();
+    if (settings.enableUpdateCheck) {
+        const latest = await checkForUpdates();
+        if (latest) {
+            console.log(`\n  ${C.yellow}◈ Update available: ${latest}  (current: ${APP_VERSION})${C.reset}`);
+            console.log(`  ${C.dim}npm update -g @fampep/kittycli${C.reset}\n`);
+            await wait(2000);
+        }
+    }
+    
+    const isApiReachable = await checkApiServer(settings.apiBaseUrl);
+    if (!isApiReachable) {
+        console.log(`  ${C.yellow}⚠ API server unreachable — opening settings...${C.reset}`);
+        await pauseForKey("Press any key to open settings...");
+        await triggerSettingsWorkflow(0);
+        settings = loadSettings();
+        const reachable = await checkApiServer(settings.apiBaseUrl);
+        if (!reachable) {
+            renderBox("Fatal", ["Still cannot connect. Exiting."], C.red);
+            rl.close();
+            return;
+        }
+    }
+
+    if (settings.discordEnabled && !discordRpc) {
+        initDiscordRpc(settings.discordClientId);
+        await wait(500);
+    }
+
+    const providersList = await createProviders(settings.apiBaseUrl);
+    const providersCount = providersList.length;
+    
+    while (true) {
+        const watchlistCount = loadWatchlist().length;
+        const historyCount = loadSearchHistory().length;
+        clearScreen();
+        renderHeader("KITTYCLI", `v${APP_VERSION}  ·  ${providersCount} providers`);
+        const W = 72;
+        console.log(`\n  ${C.bold}${C.green}╭${"─".repeat(W)}╮${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Watchlist${C.reset}  ${C.bold}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 16 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Searches ${C.reset}  ${C.bold}${historyCount}${C.reset} saved${" ".repeat(W - 16 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}API      ${C.reset}  ${C.yellow}${settings.apiBaseUrl.length > 42 ? settings.apiBaseUrl.substring(0, 39) + '...' : settings.apiBaseUrl}${C.reset}${" ".repeat(Math.max(0, W - 11 - Math.min(42, settings.apiBaseUrl.length)))}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.dim}Discord   ${C.reset}  ${settings.discordEnabled ? `${C.green}● ON${C.reset}` : `${C.dim}○ OFF${C.reset}`}${" ".repeat(W - 16)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}╰${"─".repeat(W)}╯${C.reset}\n`);
+        
+        const mainOptions = [
+            `${C.bold}🔍 Search anime${C.reset}`,
+            `${C.bold}📜 Recent searches${C.reset}  ${C.dim}${historyCount} saved${C.reset}`,
+            `${C.bold}📺 Watchlist${C.reset}        ${C.dim}${watchlistCount} item${watchlistCount !== 1 ? 's' : ''}${C.reset}`,
+            `${C.bold}▶ Quick resume${C.reset}`,
+            `${C.bold}🌐 Providers${C.reset}        ${C.dim}${providersCount} sources${C.reset}`,
+            `${C.bold}🐱 GitHub${C.reset}`,
+            `${C.bold}⚙ Settings${C.reset}`,
+            `${C.bold}❓ Help / About${C.reset}`,
+            `${C.dim}Exit${C.reset}`
+        ];
+        
+        const choiceIdx = await selectMenuOption(mainOptions, ``, { statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
+        switch (choiceIdx) {
+            case 0: await triggerSearchWorkflow(undefined, providersList); break;
+            case 1: await triggerRecentSearchesWorkflow(providersList); break;
+            case 2: await triggerWatchlistWorkflow(providersList); break;
+            case 3: await triggerQuickResume(providersList); break;
+            case 4: await triggerProviderOverviewWorkflow(providersList); break;
+            case 5: openUrl(GITHUB_URL); renderBox("GitHub", ["Opening repository in your browser..."], C.green); await wait(1500); break;
+            case 6: await triggerSettingsWorkflow(providersCount); break;
+            case 7: await showHelp(); break;
+            case 8: 
+                if (settings.confirmBeforeExit) {
+                    const confirm = await selectMenuOption(["Yes", "No"], `\n  ${C.yellow}Exit KittyCLI?${C.reset}`, { allowBack: true });
+                    if (confirm !== 0) break;
+                }
+                rl.close();
+                clearScreen();
+                console.log(`\n  ${C.green}✓ Goodbye!${C.reset}\n`);
+                return;
+        }
+    }
+}
+
+process.on('SIGINT', () => {
+    if (discordRpc) discordRpc.destroy().catch(() => {});
+    console.log(`\n  ${C.green}✓ Goodbye!${C.reset}\n`);
+    try { rl.close(); } catch(e) {}
+    process.exit(0);
 });
 
-app.listen(PORT, () => console.log(`Anime proxy server running on port ${PORT}`));
+process.on('unhandledRejection', (reason) => {
+    console.error(`\n  ${C.red}✗ Unhandled rejection:${C.reset}`, reason?.message || reason);
+    debugLog('Unhandled rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error(`\n  ${C.red}✗ Unexpected error:${C.reset}`, err.message);
+    debugLog('Uncaught exception:', err);
+    try { rl.close(); } catch(e) {}
+    process.exit(1);
+});
+
+terminalEngine().catch(err => {
+    console.error(`  ${C.red}✗ Fatal:${C.reset}`, err.message ?? err);
+    debugLog('Fatal error:', err);
+    try { rl.close(); } catch(e) {}
+    process.exit(1);
+});
