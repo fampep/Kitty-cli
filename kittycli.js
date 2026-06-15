@@ -35,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.5.5";
+const APP_VERSION = "2.5.6";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -1314,7 +1314,7 @@ async function fetchProviderList(apiBaseUrl) {
         return providers.filter(p => p.online).map(p => p.name);
     } catch (err) {
         debugLog("Failed to fetch provider list from API, using fallback list.");
-        return ["Miruro", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
+        return ["AnimeOnsen", "Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
     }
 }
 
