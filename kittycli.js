@@ -35,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.5.6";
+const APP_VERSION = "2.5.7";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -227,13 +227,13 @@ async function fetchAnimeMetadata(title) {
         const query = `
             query ($search: String) {
                 Media (search: $search, type: ANIME) {
-                    id description(asHtml: false) averageScore genres episodes status coverImage { large } season seasonYear nextAiringEpisode { episode }
+                    id description(asHtml: false) averageScore genres episodes status season seasonYear
                 }
             }
         `;
         const response = await axios.post('https://graphql.anilist.co',
             { query, variables: { search: title } },
-            { timeout: 5000 }
+            { timeout: 4000 }
         );
         const media = response.data.data?.Media;
         if (media) {
@@ -245,8 +245,7 @@ async function fetchAnimeMetadata(title) {
                 season: media.season,
                 seasonYear: media.seasonYear,
                 status: media.status,
-                anilistId: media.id,
-                coverImage: media.coverImage?.large
+                anilistId: media.id
             };
         }
     } catch(e) { debugLog(`Metadata fetch failed: ${e.message}`); }
@@ -324,56 +323,6 @@ async function fetchAnilistEpisodes(anilistId) {
         };
     } catch(e) { debugLog(`AniList episodes fetch failed: ${e.message}`); }
     return null;
-}
-
-async function fetchAnilistEpisodeTitles(anilistId) {
-    try {
-        let episodeTitles = {};
-
-        const query = `
-            query ($id: Int, $page: Int) {
-                Page(page: $page, perPage: 50) {
-                    pageInfo { hasNextPage }
-                    media(id: $id) {
-                        episodes
-                    }
-                    airingSchedules(mediaId: $id) {
-                        episode
-                        airingAt
-                    }
-                }
-            }
-        `;
-
-        const characterQuery = `
-            query ($id: Int) {
-                Media(id: $id, type: ANIME) {
-                    streamingEpisodes {
-                        title
-                        thumbnail
-                        url
-                    }
-                }
-            }
-        `;
-
-        const response = await axios.post('https://graphql.anilist.co',
-            { query: characterQuery, variables: { id: anilistId } },
-            { timeout: 5000 }
-        );
-
-        const media = response.data.data?.Media;
-        if (media?.streamingEpisodes) {
-            media.streamingEpisodes.forEach((ep, idx) => {
-                if (ep.title) {
-                    episodeTitles[idx + 1] = ep.title;
-                }
-            });
-        }
-
-        return episodeTitles;
-    } catch(e) { debugLog(`AniList episode titles fetch failed: ${e.message}`); }
-    return {};
 }
 
 async function fetchTotalEpisodesFromWorker(title, anilistId, apiBaseUrl) {
@@ -1572,26 +1521,26 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     let seasonInfo = { season: null, seasonYear: null };
 
     if (!effectiveTotalEpisodes) {
-        const totalData = await fetchTotalEpisodesFromWorker(coreTitle, anilistIdForWorker, settings.apiBaseUrl);
-        if (totalData && totalData.totalEpisodes !== undefined && totalData.totalEpisodes !== null) { effectiveTotalEpisodes = totalData.totalEpisodes; anilistIdForWorker = totalData.anilistId || undefined; }
-    }
-
-    if (anilistIdForWorker && !seasonInfo.season) {
-        const metaData = await fetchAnimeMetadata(coreTitle);
-        if (metaData) seasonInfo = { season: metaData.season, seasonYear: metaData.seasonYear };
+        try {
+            const totalData = await fetchTotalEpisodesFromWorker(coreTitle, anilistIdForWorker, settings.apiBaseUrl);
+            if (totalData && totalData.totalEpisodes !== undefined && totalData.totalEpisodes !== null) { effectiveTotalEpisodes = totalData.totalEpisodes; anilistIdForWorker = totalData.anilistId || undefined; }
+        } catch(e) {
+            debugLog(`Failed to fetch total episodes: ${e.message}`);
+        }
     }
 
     const titleMap = new Map();
     for (const ep of validLists.flatMap(p => p.list)) { const num = parseEpisodeNumber(ep); if (num && ep.title) titleMap.set(num, ep.title); }
 
-    let anilistTitles = {};
     if (anilistIdForWorker) {
-        console.log(`  ${C.dim}Fetching episode titles from AniList...${C.reset}`);
-        anilistTitles = await fetchAnilistEpisodeTitles(anilistIdForWorker);
-        for (const [epNum, title] of Object.entries(anilistTitles)) {
-            if (title && !titleMap.has(parseInt(epNum, 10))) {
-                titleMap.set(parseInt(epNum, 10), title);
+        try {
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
+            const metaData = await Promise.race([fetchAnimeMetadata(coreTitle), timeoutPromise]);
+            if (metaData) {
+                seasonInfo = { season: metaData.season, seasonYear: metaData.seasonYear };
             }
+        } catch(e) {
+            debugLog(`AniList metadata fetch failed: ${e.message}`);
         }
     }
 
@@ -1695,18 +1644,17 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         
         try {
             let stream = await withSpinner(`Fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));
-            if (!stream?.file && !stream?.url) throw new Error("No video file");
+            debugLog(`Stream received:`, JSON.stringify(stream).substring(0, 200));
+            if (!stream) throw new Error("Stream is null/undefined");
+            if (!stream.file && !stream.url) throw new Error("Stream has no video file or url");
             if (stream && !stream.file && stream.url) stream.file = stream.url;
-            
+
             let selectedQuality = null;
             if (stream.qualities && stream.qualities.length > 1) {
                 const preferredQual = watchInfo?.quality || settings.preferredQuality;
                 selectedQuality = selectQuality(stream.qualities, preferredQual);
-                if (selectedQuality && selectedQuality !== stream.file) {
-                    if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
-                        stream.file = stream.qualityUrls[selectedQuality];
-                        console.log(`  ${C.dim}Selected quality: ${selectedQuality}${C.reset}`);
-                    } else { console.log(`  ${C.yellow}⚠ Quality selection not supported by this stream${C.reset}`); }
+                if (selectedQuality && stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                    stream.file = stream.qualityUrls[selectedQuality];
                 }
             }
             
@@ -1738,6 +1686,11 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             const qualityTag = selectedQuality ? `${C.magenta}${selectedQuality}${C.reset}` : '';
             const speedInfo = `${C.dim}${settings.playbackSpeed}x${C.reset}`;
 
+            let playingTitle = seasonPrefix ? `${seasonPrefix}` : `Episode ${episodeNumStr}`;
+            if (epTitle && epTitle.trim()) {
+                playingTitle += ` — ${epTitle}`;
+            }
+
             const boxContent = [
                 `${C.bold}${C.green}${coreTitle}${C.reset}`,
             ];
@@ -1759,7 +1712,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             boxContent.push(`${C.dim}${infoParts.join(`  ${C.dim}·${C.reset}  `)}${C.reset}`);
 
             renderBox("▶ Now Playing", boxContent, C.green);
-            
+
             saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality, seasonInfo);
             await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio, selectedProvider.name, selectedServerName);
             
@@ -1773,12 +1726,15 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                 } else { userWantsToContinue = false; }
             } else { console.log(`  ${C.green}✓ Finished last episode!${C.reset}`); break; }
         } catch (err) {
+            const errorMsg = err.message || String(err);
+            debugLog(`Stream/playback error: ${errorMsg}`);
             if (settings.autoRetryFailed) {
+                console.log(`  ${C.yellow}⚠ ${errorMsg.substring(0, 60)}${C.reset}`);
                 console.log(`  ${C.yellow}⚠ Retrying episode ${targetEpisode}...${C.reset}`);
                 await wait(2000);
                 continue;
             }
-            renderBox("Playback Error", [err.message || err], C.red);
+            renderBox("Playback Error", [errorMsg], C.red);
             await wait(2000);
             break;
         }

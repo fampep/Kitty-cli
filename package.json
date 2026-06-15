@@ -1,6 +1,6 @@
 {
   "name": "@fampep/kittycli",
-  "version": "2.5.6",
+  "version": "2.5.7",
   "description": "Anime aggregator terminal client with multi-provider support",
   "main": "kittycli.js",
   "bin": {
