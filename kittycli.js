@@ -35,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.5.1";
+const APP_VERSION = "2.5.5";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -64,6 +64,7 @@ const defaultSettings = {
     discordClientId: "1511784156340818222",
     downloadDir: path.join(os.homedir(), 'Downloads'),
     downloadConcurrency: 2,
+    downloadFormat: "mkv",
     resumePlayback: true,
     preferredQuality: "auto",
     cacheTTL: 600000,
@@ -226,12 +227,12 @@ async function fetchAnimeMetadata(title) {
         const query = `
             query ($search: String) {
                 Media (search: $search, type: ANIME) {
-                    id description(asHtml: false) averageScore genres episodes status coverImage { large }
+                    id description(asHtml: false) averageScore genres episodes status coverImage { large } season seasonYear nextAiringEpisode { episode }
                 }
             }
         `;
-        const response = await axios.post('https://graphql.anilist.co', 
-            { query, variables: { search: title } }, 
+        const response = await axios.post('https://graphql.anilist.co',
+            { query, variables: { search: title } },
             { timeout: 5000 }
         );
         const media = response.data.data?.Media;
@@ -241,6 +242,8 @@ async function fetchAnimeMetadata(title) {
                 rating: media.averageScore ? media.averageScore / 10 : undefined,
                 genres: media.genres || [],
                 episodes: media.episodes,
+                season: media.season,
+                seasonYear: media.seasonYear,
                 status: media.status,
                 anilistId: media.id,
                 coverImage: media.coverImage?.large
@@ -248,6 +251,129 @@ async function fetchAnimeMetadata(title) {
         }
     } catch(e) { debugLog(`Metadata fetch failed: ${e.message}`); }
     return null;
+}
+
+async function fetchAnilistEpisodes(anilistId) {
+    try {
+        const query = `
+            query ($id: Int, $page: Int) {
+                Media(id: $id, type: ANIME) {
+                    id
+                    title { romaji english native }
+                    season seasonYear episodes status
+                    airingSchedule(page: $page, perPage: 50) {
+                        pageInfo { hasNextPage currentPage }
+                        edges {
+                            node {
+                                episode airingAt
+                            }
+                        }
+                    }
+                }
+            }
+        `;
+
+        let allEpisodes = {};
+        let page = 1;
+        let hasNextPage = true;
+
+        while (hasNextPage && page <= 5) {
+            const response = await axios.post('https://graphql.anilist.co',
+                { query, variables: { id: anilistId, page } },
+                { timeout: 5000 }
+            );
+            const media = response.data.data?.Media;
+            if (!media) break;
+
+            if (media.airingSchedule?.edges) {
+                media.airingSchedule.edges.forEach(edge => {
+                    if (edge.node.episode) {
+                        allEpisodes[edge.node.episode] = {
+                            episode: edge.node.episode,
+                            airingAt: edge.node.airingAt
+                        };
+                    }
+                });
+            }
+
+            hasNextPage = media.airingSchedule?.pageInfo?.hasNextPage || false;
+            page++;
+        }
+
+        const mediaQuery = `
+            query ($id: Int) {
+                Media(id: $id, type: ANIME) {
+                    id title { romaji english native } season seasonYear episodes status
+                }
+            }
+        `;
+        const mediaResponse = await axios.post('https://graphql.anilist.co',
+            { query: mediaQuery, variables: { id: anilistId } },
+            { timeout: 5000 }
+        );
+        const media = mediaResponse.data.data?.Media;
+
+        return {
+            title: media?.title?.romaji || media?.title?.english || 'Unknown',
+            episodes: media?.episodes,
+            season: media?.season,
+            seasonYear: media?.seasonYear,
+            status: media?.status,
+            anilistId: anilistId,
+            episodeTimes: allEpisodes
+        };
+    } catch(e) { debugLog(`AniList episodes fetch failed: ${e.message}`); }
+    return null;
+}
+
+async function fetchAnilistEpisodeTitles(anilistId) {
+    try {
+        let episodeTitles = {};
+
+        const query = `
+            query ($id: Int, $page: Int) {
+                Page(page: $page, perPage: 50) {
+                    pageInfo { hasNextPage }
+                    media(id: $id) {
+                        episodes
+                    }
+                    airingSchedules(mediaId: $id) {
+                        episode
+                        airingAt
+                    }
+                }
+            }
+        `;
+
+        const characterQuery = `
+            query ($id: Int) {
+                Media(id: $id, type: ANIME) {
+                    streamingEpisodes {
+                        title
+                        thumbnail
+                        url
+                    }
+                }
+            }
+        `;
+
+        const response = await axios.post('https://graphql.anilist.co',
+            { query: characterQuery, variables: { id: anilistId } },
+            { timeout: 5000 }
+        );
+
+        const media = response.data.data?.Media;
+        if (media?.streamingEpisodes) {
+            media.streamingEpisodes.forEach((ep, idx) => {
+                if (ep.title) {
+                    episodeTitles[idx + 1] = ep.title;
+                }
+            });
+        }
+
+        return episodeTitles;
+    } catch(e) { debugLog(`AniList episode titles fetch failed: ${e.message}`); }
+    return {};
 }
 
 async function fetchTotalEpisodesFromWorker(title, anilistId, apiBaseUrl) {
@@ -287,7 +413,7 @@ function saveProgress(progress) {
     try { fs.writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2), 'utf8'); } catch(e) {}
 }
 
-function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId, position = 0, quality = null) {
+function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, anilistId, position = 0, quality = null, seasonInfo = null) {
     try {
         const list = loadWatchlist();
         const existingIdx = list.findIndex(item => item.title.toLowerCase() === title.toLowerCase());
@@ -297,15 +423,21 @@ function saveToWatchlist(title, episode, audio, selectedMatches, totalEpisodes, 
             hasSub: m.item.hasSub,
             hasDub: m.item.hasDub
         }));
-        const newItem = { 
-            title, lastEpisode: episode, audio, timestamp: new Date().toISOString(), 
+        const newItem = {
+            title, lastEpisode: episode, audio, timestamp: new Date().toISOString(),
             matches: matchesData, totalEpisodes, anilistId, position, quality, lastWatched: Date.now()
         };
+        if (seasonInfo) {
+            newItem.season = seasonInfo.season;
+            newItem.seasonYear = seasonInfo.seasonYear;
+        }
         if (existingIdx !== -1) {
             if (totalEpisodes === undefined && list[existingIdx].totalEpisodes) newItem.totalEpisodes = list[existingIdx].totalEpisodes;
             if (anilistId === undefined && list[existingIdx].anilistId) newItem.anilistId = list[existingIdx].anilistId;
             newItem.position = position || list[existingIdx].position || 0;
             newItem.quality = quality || list[existingIdx].quality || null;
+            if (!seasonInfo && list[existingIdx].season) newItem.season = list[existingIdx].season;
+            if (!seasonInfo && list[existingIdx].seasonYear) newItem.seasonYear = list[existingIdx].seasonYear;
             list[existingIdx] = newItem;
         } else list.unshift(newItem);
         saveWatchlist(list);
@@ -378,6 +510,7 @@ function loadSettings() {
         discordClientId: typeof stored.discordClientId === "string" && stored.discordClientId.trim() ? stored.discordClientId.trim() : defaultSettings.discordClientId,
         downloadDir: typeof stored.downloadDir === "string" && stored.downloadDir.trim() ? stored.downloadDir.trim() : defaultSettings.downloadDir,
         downloadConcurrency: typeof stored.downloadConcurrency === "number" ? Math.min(Math.max(stored.downloadConcurrency, 1), 5) : defaultSettings.downloadConcurrency,
+        downloadFormat: stored.downloadFormat === "mp4" ? "mp4" : "mkv",
         resumePlayback: typeof stored.resumePlayback === "boolean" ? stored.resumePlayback : true,
         preferredQuality: typeof stored.preferredQuality === "string" ? stored.preferredQuality : defaultSettings.preferredQuality,
         cacheTTL: typeof stored.cacheTTL === "number" ? stored.cacheTTL : defaultSettings.cacheTTL,
@@ -715,9 +848,9 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
     });
 }
 
-async function downloadWithFfmpegProgress(url, outputPath) {
+async function downloadWithFfmpegProgress(url, outputPath, format = 'mkv') {
     return new Promise((resolve) => {
-        const args = ['-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-y', outputPath];
+        const args = ['-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-f', format, '-y', outputPath];
         const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
         let duration = 0, lastProgress = 0;
         ffmpeg.stderr.on('data', (data) => {
@@ -749,7 +882,7 @@ async function downloadWithFfmpegProgress(url, outputPath) {
     });
 }
 
-async function resumeableDownload(serverDetails, suggestedFilename, onProgress) {
+async function resumeableDownload(serverDetails, suggestedFilename, onProgress, format = 'mkv') {
     const settings = loadSettings();
     const cleanFilename = suggestedFilename.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();
     const outputDir = settings.downloadDir;
@@ -784,7 +917,7 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress) 
 
     if (serverDetails.file.includes('.m3u8')) {
         console.log(`  ${C.magenta}◈ hls stream detected — using ffmpeg${C.reset}`);
-        return downloadWithFfmpegProgress(serverDetails.file, downloadPath);
+        return downloadWithFfmpegProgress(serverDetails.file, downloadPath, format);
     }
 
     try {
@@ -855,10 +988,10 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress) 
     }
 }
 
-async function batchDownloadQueue(jobs, coreTitle, statusBar) {
+async function batchDownloadQueue(jobs, coreTitle, statusBar, selectedQuality = null) {
     const settings = loadSettings();
     const concurrency = settings.downloadConcurrency;
-    console.log(`\n  ${C.bold}${C.green}◈ batch download  ${C.cyan}${jobs.length} episodes${C.reset}  ${C.dim}(concurrency: ${concurrency})${C.reset}\n`);
+    console.log(`\n  ${C.bold}${C.green}◈ batch download  ${C.cyan}${jobs.length} episodes${C.reset}  ${C.dim}(concurrency: ${concurrency}, format: ${settings.downloadFormat.toUpperCase()})${C.reset}\n`);
     let successCount = 0, failCount = 0;
     let index = 0;
     async function worker() {
@@ -868,9 +1001,13 @@ async function batchDownloadQueue(jobs, coreTitle, statusBar) {
             console.log(`  ${C.dim}[${i+1}/${jobs.length}]${C.reset} ${C.cyan}episode ${job.episode}${C.reset}`);
             try {
                 const stream = await withSpinner(`fetching stream from ${job.provider.name}...`, async () => await job.provider.extractStreamFromLinkId(job.serverId));
-                const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
+                if (stream && selectedQuality && stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                    stream.file = stream.qualityUrls[selectedQuality];
+                    console.log(`  ${C.dim}  quality: ${selectedQuality}${C.reset}`);
+                }
+                const ext = settings.downloadFormat;
                 const filename = `${coreTitle} - Episode ${job.episode} (${job.audio.toUpperCase()}).${ext}`;
-                const success = await resumeableDownload(stream, filename);
+                const success = await resumeableDownload(stream, filename, null, ext);
                 if (success) successCount++;
                 else failCount++;
             } catch (err) {
@@ -1001,30 +1138,37 @@ async function showHelp() {
         `  ${C.green}N${C.reset}          stop binge`,
         `  ${C.green}A${C.reset}          toggle audio (sub/dub)`,
         ``,
-        `${C.bold}${C.cyan}Features${C.reset}`,
-        `  • Multi-provider search & streaming`,
-        `  • Watchlist with progress tracking`,
-        `  • Resumable downloads (HTTP + HLS)`,
-        `  • Parallel batch downloads`,
-        `  • Resume playback position (IPC)`,
-        `  • Video quality selection`,
-        `  • AniList metadata panel`,
-        `  • Discord Rich Presence`,
-        `  • System notifications`,
+        `${C.bold}${C.cyan}Premium Features${C.reset}`,
+        `  ${C.green}🎬 Multi-provider${C.reset} search & streaming across 15+ sources`,
+        `  ${C.green}📝 Smart Watchlist${C.reset} with progress, seasons & episode tracking`,
+        `  ${C.green}⬇️  Download System${C.reset} (${C.bold}MKV${C.reset}/${C.dim}MP4${C.reset}) with quality selection`,
+        `  ${C.green}🔄 Resumable${C.reset} downloads & playback position sync`,
+        `  ${C.green}⚡ Batch${C.reset} download with parallel processing`,
+        `  ${C.green}🎨 AniList${C.reset} metadata with real episode titles & seasons`,
+        `  ${C.green}💬 Discord${C.reset} Rich Presence & system notifications`,
+        `  ${C.green}🎛️  Playback${C.reset} quality selection on stream`,
         ``,
-        `${C.bold}${C.cyan}GitHub${C.reset}`,
+        `${C.bold}${C.cyan}Settings Available${C.reset}`,
+        `  • Download format (MKV/MP4) & quality preferences`,
+        `  • Auto-play, resume, quality defaults`,
+        `  • Binge delay, playback speed`,
+        `  • Provider similarity matching & retry policies`,
+        ``,
+        `${C.bold}${C.cyan}Learn More${C.reset}`,
         `  ${C.underline}${GITHUB_URL}${C.reset}`,
         ``,
         `${C.dim}Press any key to return${C.reset}`
     ];
-    renderBox("Help & About", content, C.cyan);
+    renderBox("Help & Features", content, C.cyan);
     await pauseForKey();
 }
 
 async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio, nextEpisodeTitle, onAudioToggle, autoPlayNext) {
     if (autoPlayNext) return { continue: true };
     if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
-        console.log(`  ${C.yellow}Next episode in ${seconds}s...${C.reset}`);
+        const titleText = nextEpisodeTitle ? ` • ${nextEpisodeTitle.substring(0, 50)}` : '';
+        console.log(`  ${C.yellow}Next: Episode ${nextEpisodeNum}${titleText}${C.reset}`);
+        console.log(`  ${C.yellow}Starting in ${seconds}s...${C.reset}`);
         await wait(seconds * 1000);
         return { continue: true };
     }
@@ -1034,11 +1178,12 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
         process.stdin.setRawMode(true);
         let audio = currentAudio;
         const render = () => {
-            const filled = Math.min(24, Math.max(0, Math.round((remaining / seconds) * 24)));
-            const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 24 - filled))}${C.reset}`;
+            const filled = Math.min(20, Math.max(0, Math.round((remaining / seconds) * 20)));
+            const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 20 - filled))}${C.reset}`;
             const audioTag = audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
-            const titleDisplay = nextEpisodeTitle ? ` ${C.dim}—${C.reset} ${C.dim}${nextEpisodeTitle.substring(0, 40)}${C.reset}` : "";
-            process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶ Episode ${nextEpisodeNum}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y now  N stop  A audio${C.reset} [${audioTag}]  `);
+            const epStr = String(nextEpisodeNum).padStart(2, '0');
+            const titleDisplay = nextEpisodeTitle ? ` ${C.dim}•${C.reset} ${C.yellow}${nextEpisodeTitle.substring(0, 35)}${C.reset}` : "";
+            process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶ E${epStr}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y now  N stop  A audio${C.reset} [${audioTag}]  `);
         };
         const timer = setInterval(() => {
             if (resolved) return;
@@ -1192,32 +1337,53 @@ async function selectServerTwoStep(providerServersMap, audioLabelText, statusBar
 }
 
 // FIXED: Safe episode selection with bounds checking for progress bar
-async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBar, titleMap = new Map()) {
+async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBar, titleMap = new Map(), seasonInfo = null) {
     const watchInfo = getWatchlistInfo(title);
     const lastWatched = watchInfo ? watchInfo.lastEpisode : 0;
     const effectiveTotal = totalEpisodes || watchInfo?.totalEpisodes || null;
     const episodeOptions = [];
     for (let i = 1; i <= maxEpNum; i++) {
         let denominator = effectiveTotal ? `${C.dim}/${effectiveTotal}${C.reset}` : `${C.dim}/?${C.reset}`;
-        let label = `${C.bold}Ep ${i}${C.reset}${denominator}`;
+        let episodeNum = `${C.bold}${C.cyan}EP ${String(i).padStart(2, '0')}${C.reset}`;
+        let label = `${episodeNum}${denominator}`;
+
         if (effectiveTotal && effectiveTotal > 0) {
             const percent = Math.min(100, Math.max(0, Math.round((i / effectiveTotal) * 100)));
-            const filled = Math.min(10, Math.max(0, Math.round(percent / 10)));
-            const minibar = `${C.green}${'▰'.repeat(filled)}${C.reset}${C.dim}${'▱'.repeat(Math.max(0, 10 - filled))}${C.reset}`;
-            label += `  [${minibar}] ${C.dim}${percent}%${C.reset}`;
+            const filled = Math.min(8, Math.max(0, Math.round(percent / 12.5)));
+            const minibar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 8 - filled))}${C.reset}`;
+            label += `  [${minibar}] ${C.dim}${percent.toString().padStart(3)}%${C.reset}`;
         }
+
         const epTitle = titleMap.get(i);
         if (epTitle && epTitle.trim()) {
-            const shortTitle = epTitle.length > 40 ? epTitle.slice(0, 37) + '...' : epTitle;
-            label += `  ${C.dim}${shortTitle}${C.reset}`;
+            const maxTitleLen = 42;
+            let displayTitle = epTitle;
+            if (displayTitle.length > maxTitleLen) {
+                displayTitle = displayTitle.slice(0, maxTitleLen - 1) + '…';
+            }
+            label += `  ${C.yellow}✦ ${displayTitle}${C.reset}`;
         }
+
         let marker = "";
-        if (i <= lastWatched) marker = `${C.green}✓${C.reset} `;
-        else if (i === lastWatched + 1) marker = `${C.yellow}▶${C.reset} `;
-        else marker = `${C.dim}·${C.reset} `;
-        episodeOptions.push(`${marker}${label}`);
+        if (i <= lastWatched) marker = `${C.green}✓${C.reset}`;
+        else if (i === lastWatched + 1) marker = `${C.yellow}▶${C.reset}`;
+        else marker = `${C.dim}·${C.reset}`;
+
+        episodeOptions.push(`${marker}  ${label}`);
     }
-    const pickedEpIdx = await selectMenuOption(episodeOptions, `\n  ${C.bold}${C.cyan}◈ Episodes${C.reset}  ${C.dim}${maxEpNum} available${C.reset}`, { allowBack: true, statusBar });
+
+    let headerText = `\n  ${C.bold}${C.cyan}◈ Episode Select${C.reset}  ${C.dim}${maxEpNum} episodes${C.reset}`;
+    if (seasonInfo && (seasonInfo.season || seasonInfo.seasonYear)) {
+        const seasonDisplay = [];
+        if (seasonInfo.season) {
+            const seasonMap = { winter: '❄️ Winter', spring: '🌸 Spring', summer: '☀️ Summer', fall: '🍂 Fall' };
+            const seasonName = seasonMap[seasonInfo.season.toLowerCase()] || seasonInfo.season;
+            seasonDisplay.push(`${C.cyan}${seasonName}${C.reset}`);
+        }
+        if (seasonInfo.seasonYear) seasonDisplay.push(`${C.bold}${seasonInfo.seasonYear}${C.reset}`);
+        headerText += `  ${C.dim}•${C.reset}  ${seasonDisplay.join(' ')}`;
+    }
+    const pickedEpIdx = await selectMenuOption(episodeOptions, headerText, { allowBack: true, statusBar });
     return pickedEpIdx >= 0 ? pickedEpIdx + 1 : -1;
 }
 
@@ -1226,30 +1392,44 @@ async function showMetadataPanel(title) {
     const metadata = await fetchAnimeMetadata(title);
     if (metadata) {
         const content = [];
+
+        const seasonMapEmoji = { winter: '❄️', spring: '🌸', summer: '☀️', fall: '🍂' };
+        const seasonEmoji = metadata.season ? seasonMapEmoji[metadata.season.toLowerCase()] || '📺' : '📺';
+
         if (metadata.rating) {
             const filled = Math.min(5, Math.max(0, Math.round(metadata.rating / 2)));
             const stars = `${C.yellow}${'★'.repeat(filled)}${C.reset}${C.dim}${'☆'.repeat(Math.max(0, 5 - filled))}${C.reset}`;
             content.push(`${stars}  ${C.bold}${metadata.rating}${C.reset}${C.dim}/10${C.reset}`);
             content.push('');
         }
+
+        const seasonInfo = [];
+        if (metadata.season) seasonInfo.push(`${seasonEmoji} ${C.cyan}${metadata.season.charAt(0).toUpperCase() + metadata.season.slice(1)}${C.reset}`);
+        if (metadata.seasonYear) seasonInfo.push(`${C.bold}${metadata.seasonYear}${C.reset}`);
+        if (seasonInfo.length > 0) content.push(`${C.dim}Season${C.reset}   ${seasonInfo.join(' ')}`);
+
         if (metadata.genres && metadata.genres.length) {
-            const genreStr = metadata.genres.slice(0, 5).map(g => `${C.cyan}${g}${C.reset}`).join(`  ${C.dim}·${C.reset}  `);
+            const genreStr = metadata.genres.slice(0, 6).map(g => `${C.cyan}${g}${C.reset}`).join(`  ${C.dim}•${C.reset}  `);
             content.push(`${C.dim}Genres${C.reset}   ${genreStr}`);
         }
-        if (metadata.episodes) content.push(`${C.dim}Episodes${C.reset} ${C.bold}${metadata.episodes}${C.reset}`);
-        if (metadata.status) content.push(`${C.dim}Status${C.reset}   ${C.yellow}${metadata.status}${C.reset}`);
+
+        const epStatusLine = [];
+        if (metadata.episodes) epStatusLine.push(`${C.bold}${metadata.episodes}${C.reset} episodes`);
+        if (metadata.status) epStatusLine.push(`${C.yellow}${metadata.status}${C.reset}`);
+        if (epStatusLine.length > 0) content.push(`${C.dim}Info${C.reset}     ${epStatusLine.join(`  ${C.dim}•${C.reset}  `)}`);
+
         if (metadata.synopsis) {
             content.push('');
             const cleanSynopsis = stripHtmlTags(metadata.synopsis);
             const words = cleanSynopsis.split(' ');
             let line = '';
             for (const word of words) {
-                if ((line + ' ' + word).length <= 68) line += (line ? ' ' : '') + word;
+                if ((line + ' ' + word).length <= 70) line += (line ? ' ' : '') + word;
                 else { content.push(`  ${C.dim}${line}${C.reset}`); line = word; }
             }
             if (line) content.push(`  ${C.dim}${line}${C.reset}`);
         }
-        renderBox(title, content, C.green);
+        renderBox(`${seasonEmoji} ${title}`, content, C.green);
     } else {
         renderBox("Info", [`No metadata found for "${title}".`], C.dim);
     }
@@ -1389,16 +1569,35 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     const watchInfo = getWatchlistInfo(coreTitle);
     let effectiveTotalEpisodes = watchInfo?.totalEpisodes ?? null;
     let anilistIdForWorker = watchInfo?.anilistId ?? undefined;
+    let seasonInfo = { season: null, seasonYear: null };
+
     if (!effectiveTotalEpisodes) {
         const totalData = await fetchTotalEpisodesFromWorker(coreTitle, anilistIdForWorker, settings.apiBaseUrl);
         if (totalData && totalData.totalEpisodes !== undefined && totalData.totalEpisodes !== null) { effectiveTotalEpisodes = totalData.totalEpisodes; anilistIdForWorker = totalData.anilistId || undefined; }
     }
 
+    if (anilistIdForWorker && !seasonInfo.season) {
+        const metaData = await fetchAnimeMetadata(coreTitle);
+        if (metaData) seasonInfo = { season: metaData.season, seasonYear: metaData.seasonYear };
+    }
+
     const titleMap = new Map();
     for (const ep of validLists.flatMap(p => p.list)) { const num = parseEpisodeNumber(ep); if (num && ep.title) titleMap.set(num, ep.title); }
+
+    let anilistTitles = {};
+    if (anilistIdForWorker) {
+        console.log(`  ${C.dim}Fetching episode titles from AniList...${C.reset}`);
+        anilistTitles = await fetchAnilistEpisodeTitles(anilistIdForWorker);
+        for (const [epNum, title] of Object.entries(anilistTitles)) {
+            if (title && !titleMap.has(parseInt(epNum, 10))) {
+                titleMap.set(parseInt(epNum, 10), title);
+            }
+        }
+    }
+
     let targetEpisode = startingEpisode || 1;
     if (!startingEpisode && !isBatchMode) {
-        const picked = await selectEpisodeWithMarkers(maxEpNum, effectiveTotalEpisodes, coreTitle, statusBar, titleMap);
+        const picked = await selectEpisodeWithMarkers(maxEpNum, effectiveTotalEpisodes, coreTitle, statusBar, titleMap, seasonInfo);
         if (picked === -1) return;
         targetEpisode = picked;
     }
@@ -1418,9 +1617,18 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         const selection = await selectServerTwoStep(sampleProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
         const { provider: selectedProvider, serverId } = selection;
+
+        let selectedQuality = null;
+        const sampleStream = await withSpinner(`Fetching stream info for quality selection...`, async () => await selectedProvider.extractStreamFromLinkId(serverId));
+        if (sampleStream.qualities && sampleStream.qualities.length > 1) {
+            const qualityOptions = sampleStream.qualities.map(q => `${q}`);
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            if (qualityIdx >= 0) selectedQuality = sampleStream.qualities[qualityIdx];
+        }
+
         const jobs = [];
         for (let ep = start; ep <= end; ep++) jobs.push({ episode: ep, title: titleMap.get(ep) || `Episode ${ep}`, provider: selectedProvider, serverId, serverName: selection.serverName, audio });
-        await batchDownloadQueue(jobs, coreTitle, statusBar);
+        await batchDownloadQueue(jobs, coreTitle, statusBar, selectedQuality);
         return;
     }
 
@@ -1438,9 +1646,23 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         if (!selection) return;
         const stream = await withSpinner(`Fetching stream from ${selection.provider.name}...`, async () => await selection.provider.extractStreamFromLinkId(selection.serverId));
         if (stream && !stream.file && stream.url) stream.file = stream.url;
-        const ext = stream.file.includes('.m3u8') ? '.mp4' : (stream.file.match(/\.(mp4|mkv|mov|avi)($|\?)/)?.[1] || 'mp4');
+
+        let selectedQuality = null;
+        if (stream.qualities && stream.qualities.length > 1) {
+            const qualityOptions = stream.qualities.map(q => `${q}`);
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            if (qualityIdx >= 0) {
+                selectedQuality = stream.qualities[qualityIdx];
+                if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
+                    stream.file = stream.qualityUrls[selectedQuality];
+                    console.log(`  ${C.dim}Selected quality: ${selectedQuality}${C.reset}`);
+                }
+            }
+        }
+
+        const ext = settings.downloadFormat;
         const filename = `${coreTitle} - Episode ${targetEpisode} (${audio.toUpperCase()}).${ext}`;
-        await resumeableDownload(stream, filename);
+        await resumeableDownload(stream, filename, null, ext);
         return;
     }
 
@@ -1503,18 +1725,42 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                 }
             }
             
-            const episodeDisplay = effectiveTotalEpisodes ? `Episode ${targetEpisode}/${effectiveTotalEpisodes}` : `Episode ${targetEpisode} (ongoing?)`;
+            const episodeNumStr = String(targetEpisode).padStart(2, '0');
             const epTitle = titleMap.get(targetEpisode);
-            const playingTitle = epTitle ? `${episodeDisplay} — ${epTitle}` : episodeDisplay;
+            let seasonPrefix = '';
+            if (seasonInfo.season) {
+                const seasonNum = seasonInfo.season === 'winter' ? 1 : seasonInfo.season === 'spring' ? 2 : seasonInfo.season === 'summer' ? 3 : seasonInfo.season === 'fall' ? 4 : 1;
+                seasonPrefix = `${C.bold}${C.cyan}S${seasonNum}E${episodeNumStr}${C.reset}`;
+            }
+
+            const episodeDisplay = effectiveTotalEpisodes ? `${C.dim}${targetEpisode}/${effectiveTotalEpisodes}${C.reset}` : `${C.dim}${targetEpisode}/?${C.reset}`;
             const audioTag = currentAudio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
-            
-            renderBox("Now Playing", [
+            const qualityTag = selectedQuality ? `${C.magenta}${selectedQuality}${C.reset}` : '';
+            const speedInfo = `${C.dim}${settings.playbackSpeed}x${C.reset}`;
+
+            const boxContent = [
                 `${C.bold}${C.green}${coreTitle}${C.reset}`,
-                `${C.yellow}${playingTitle}${C.reset}`,
-                `${C.dim}${selectedProvider.name}  ·  ${selectedServerName}  ·${C.reset}  ${audioTag}  ${C.dim}·  ${settings.playbackSpeed}x${C.reset}`
-            ], C.green);
+            ];
+
+            if (seasonPrefix) {
+                boxContent.push(`${seasonPrefix}  ${episodeDisplay}`);
+            } else {
+                boxContent.push(`${C.bold}Episode ${episodeNumStr}${C.reset}  ${episodeDisplay}`);
+            }
+
+            if (epTitle && epTitle.trim()) {
+                const titleText = epTitle.length > 70 ? epTitle.slice(0, 67) + '…' : epTitle;
+                boxContent.push(`${C.yellow}${titleText}${C.reset}`);
+            }
+
+            const infoParts = [selectedProvider.name, selectedServerName, audioTag];
+            if (qualityTag) infoParts.push(qualityTag);
+            infoParts.push(speedInfo);
+            boxContent.push(`${C.dim}${infoParts.join(`  ${C.dim}·${C.reset}  `)}${C.reset}`);
+
+            renderBox("▶ Now Playing", boxContent, C.green);
             
-            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality);
+            saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality, seasonInfo);
             await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio, selectedProvider.name, selectedServerName);
             
             if (targetEpisode < maxEpNum) {
@@ -1591,10 +1837,30 @@ async function triggerWatchlistWorkflow(providersList) {
         return;
     }
     const options = list.map((item) => {
-        const epDisplay = item.totalEpisodes ? `${C.bold}ep ${item.lastEpisode}${C.reset}${C.dim}/${item.totalEpisodes}${C.reset}` : `${C.bold}ep ${item.lastEpisode}${C.reset}${C.dim}/?${C.reset}`;
+        const epStr = String(item.lastEpisode).padStart(2, '0');
+        let epDisplay = `${C.bold}E${epStr}${C.reset}`;
+
+        if (item.season) {
+            const seasonMap = { winter: '❄️', spring: '🌸', summer: '☀️', fall: '🍂' };
+            const seasonEmoji = seasonMap[item.season.toLowerCase()] || '📺';
+            epDisplay = `${seasonEmoji} ${C.bold}S${epStr}${C.reset}`;
+            if (item.seasonYear) {
+                epDisplay += ` ${C.dim}(${item.seasonYear})${C.reset}`;
+            }
+        }
+
+        if (item.totalEpisodes) {
+            epDisplay += `${C.dim}/${item.totalEpisodes}${C.reset}`;
+        } else {
+            epDisplay += `${C.dim}/?${C.reset}`;
+        }
+
         const audioTag = item.audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
         const dateStr = item.lastWatched ? new Date(item.lastWatched).toLocaleDateString() : item.timestamp?.split('T')[0] || '';
-        return `${padRightVisible(item.title, 40)}  ${epDisplay}  ${audioTag}  ${C.dim}${dateStr}${C.reset}`;
+        const progressPercent = item.totalEpisodes ? Math.round((item.lastEpisode / item.totalEpisodes) * 100) : 0;
+        const progressBar = progressPercent > 0 ? ` ${C.dim}[${Math.round(progressPercent / 20)}█]${C.reset}` : '';
+
+        return `${padRightVisible(item.title, 35)}  ${epDisplay}  ${audioTag}${progressBar}  ${C.dim}${dateStr}${C.reset}`;
     });
     options.push(`${C.dim}Clear watchlist${C.reset}`, `${C.dim}Go back${C.reset}`);
     const selectedIdx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}◈ Watchlist${C.reset}`, { allowBack: true });
@@ -1608,11 +1874,13 @@ async function triggerWatchlistWorkflow(providersList) {
     if (selectedIdx === list.length + 1) return;
     const targetItem = list[selectedIdx];
     const nextEpNum = targetItem.lastEpisode + 1;
+    const nextEpStr = String(nextEpNum).padStart(2, '0');
+    const lastEpStr = String(targetItem.lastEpisode).padStart(2, '0');
     const totalHint = targetItem.totalEpisodes ? `/${targetItem.totalEpisodes}` : '/?';
     const actionOptions = [
-        `▶ Resume ep ${nextEpNum}${totalHint}`,
-        `↺ Replay ep ${targetItem.lastEpisode}${totalHint}`,
-        `⏮ Start from ep 1`,
+        `▶ Resume E${nextEpStr}${totalHint}`,
+        `↺ Replay E${lastEpStr}${totalHint}`,
+        `⏮ Start from E01`,
         `✎ Edit progress`,
         `◈ Toggle audio (${targetItem.audio.toUpperCase()})`,
         `✓ Mark completed`,
@@ -1697,6 +1965,7 @@ async function triggerSettingsWorkflow(providersCount) {
             `Resume playback   ${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `Discord RPC       ${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `Download dir      ${C.dim}${settings.downloadDir.length > 30 ? '...' + settings.downloadDir.slice(-27) : settings.downloadDir}${C.reset}`,
+            `Download format   ${C.dim}${settings.downloadFormat.toUpperCase()}${C.reset}`,
             `API base URL      ${C.dim}${settings.apiBaseUrl}${C.reset}`,
             `Min similarity    ${C.dim}${settings.minSimilarityScore}%${C.reset}`,
             `Notifications     ${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
@@ -1754,34 +2023,39 @@ async function triggerSettingsWorkflow(providersCount) {
                 }
                 break;
             case 7:
+                const formatOpts = ["MKV (mkv)", "MP4 (mp4)"];
+                const formatIdx = await selectMenuOption(formatOpts, `\n  ${C.bold}${C.cyan}Download format${C.reset}`, { allowBack: true });
+                if (formatIdx >= 0) { settings.downloadFormat = formatIdx === 0 ? "mkv" : "mp4"; saveSettings(settings); }
+                break;
+            case 8:
                 const newUrl = await askQuestion(`\n  ${C.yellow}API base URL${C.reset}  ${C.bold}›${C.reset} `);
                 if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("Saved", [`API URL → ${settings.apiBaseUrl}`], C.green); await wait(1200); }
                 break;
-            case 8:
+            case 9:
                 const minScore = await askNumber(`\n  ${C.yellow}Minimum similarity score (1-100)${C.reset}  ${C.bold}›${C.reset} `, 1, 100);
                 settings.minSimilarityScore = minScore;
                 saveSettings(settings);
                 renderBox("Saved", [`Min similarity: ${settings.minSimilarityScore}%`], C.green);
                 await wait(1200);
                 break;
-            case 9:
+            case 10:
                 settings.enableNotifications = !settings.enableNotifications;
                 saveSettings(settings);
                 renderBox("Updated", [`Notifications: ${settings.enableNotifications ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
-            case 10:
+            case 11:
                 settings.autoRetryFailed = !settings.autoRetryFailed;
                 saveSettings(settings);
                 renderBox("Updated", [`Auto retry: ${settings.autoRetryFailed ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
-            case 11:
+            case 12:
                 clearAllCaches();
                 renderBox("Done", ["All caches cleared."], C.green);
                 await wait(1000);
                 break;
-            case 12:
+            case 13:
                 saveSettings(defaultSettings);
                 clearAllCaches();
                 renderBox("Done", ["Settings reset to defaults."], C.green);
