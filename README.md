@@ -1,182 +1,135 @@
-KITTYCLI - Anime Terminal Streaming Client
+# KittyCLI
 
-OVERVIEW
+Terminal-based anime streaming and management client with multi-provider search, streaming, downloads, and watchlist tracking.
 
-Kittycli is a terminal-based anime streaming and management application that aggregates multiple providers, allowing you to search, stream, download, and track anime series all from the command line.
+## Installation
 
-INSTALLATION
+```bash
+npm install -g @fampep/kittycli
+```
 
-Global (recommended):
-  npm install -g @fampep/kittycli
+Then run:
+```bash
+kittycli
+```
 
-Local development:
-  npm install
-  node kittycli.js
+## Requirements
 
-REQUIREMENTS
+- **Node.js** 18+
+- **mpv** - for streaming
+  - Windows: `choco install mpv` or `winget install mpv.net`
+  - macOS: `brew install mpv`
+  - Linux: `apt install mpv`
 
-  Node.js 18 or higher
-  mpv (for streaming episodes) - install via:
-    Windows: choco install mpv or winget install mpv.net
-    macOS: brew install mpv
-    Linux: apt install mpv (Ubuntu/Debian) or pacman -S mpv (Arch)
-  
-  ffmpeg (optional, for HLS stream downloads) - install via:
-    Windows: choco install ffmpeg or winget install ffmpeg
-    macOS: brew install ffmpeg
-    Linux: apt install ffmpeg (Ubuntu/Debian) or pacman -S ffmpeg (Arch)
+- **ffmpeg** (optional) - for HLS downloads
+  - Windows: `choco install ffmpeg` or `winget install ffmpeg`
+  - macOS: `brew install ffmpeg`
+  - Linux: `apt install ffmpeg`
 
-QUICK START
+## Features
 
-1. Run the application:
-   kittycli
+- **Multi-Provider Search** - Search 15+ anime providers simultaneously
+- **Streaming** - Watch with quality selection and automatic subtitles
+- **Downloads** - MKV/MP4 with resumable progress and batch processing
+- **Watchlist** - Track progress and resume positions automatically
+- **Binge Mode** - Auto-play next episode with countdown
+- **AniList Integration** - Episode titles, metadata, and airing schedules
+- **Discord Rich Presence** - Show what you're watching to friends
+- **Subtitle Management** - Auto-download and organize by series
 
-2. From the main menu, select "Search anime" to find a series
+## Quick Start
 
-3. Browse results and select a provider/episode to stream
+1. Launch the app: `kittycli`
+2. Select "Search anime" from the menu
+3. Find your series and select a provider
+4. Choose your episode and press Enter to stream
+5. Progress saves automatically
 
-4. Episodes will play in mpv player and your progress is automatically saved
+## Keyboard Controls
 
-FEATURES
+| Key | Action |
+|-----|--------|
+| UP/DOWN | Navigate menu |
+| ENTER | Select item |
+| 1-9 | Quick jump |
+| HOME/END | Top/bottom |
+| PAGE UP/DOWN | Next page |
+| Q/ESC | Go back |
+| ? | Help |
+| CTRL+C | Exit |
 
-Multi-Provider Search
-  Search across 15+ anime providers simultaneously and find the best stream
+### Binge Mode
 
-Streaming
-  Watch episodes directly in mpv with automatic quality selection and subtitle support
+| Key | Action |
+|-----|--------|
+| Y/ENTER | Play next episode |
+| N | Stop |
+| A | Toggle SUB/DUB |
 
-Downloads
-  Download episodes in MKV or MP4 format with resumable progress and parallel batch processing
+## Configuration
 
-Watchlist
-  Keep track of watched episodes with automatic progress saving and resume position
+Settings stored at: `~/.kittycli/settings.json`
 
-Binge Mode
-  Automatic countdown between episodes with instant skip to next episode
+Key options:
+- `defaultAudio` - sub or dub
+- `downloadFormat` - mkv or mp4
+- `playbackSpeed` - 0.5x to 3.0x
+- `bingeCountdownSeconds` - delay between episodes
+- `resumePlayback` - auto-resume from last position
+- `discordEnabled` - show Discord presence
+- `preferredQuality` - auto, 1080p, 720p, etc
 
-Subtitle Management
-  Auto-download and manage subtitle files organized by series
+## Data Directory
 
-AniList Integration
-  Fetch episode titles, airing schedules, and metadata directly from AniList
+```
+~/.kittycli/
+├── watchlist.json        # Your anime list and progress
+├── search-history.json   # Previous searches
+├── settings.json         # Your configuration
+├── progress.json         # Episode resume points
+├── subs/                 # Downloaded subtitles
+└── debug.log            # Debug logs
+```
 
-Discord Rich Presence
-  Show what you are watching to your Discord friends (optional)
+## AniList ID Support
 
-Progress Tracking
-  Automatic resume points for each episode saved locally
+The app uses AniList IDs for direct, instant streaming across all 19 supported providers.
 
-USAGE
+## Troubleshooting
 
-Main Menu Options:
+**Video won't play**
+- Ensure mpv is installed and in PATH
+- Try a different provider
+- Add to settings: `"mpvArgs": "--demuxer-lavf-o=analyzeduration=30000000,probesize=100000000,fflags=+discardcorrupt"`
 
-  Search anime
-    Search for any anime by title, find results across multiple providers, and stream or download
+**Downloads fail**
+- Check disk space
+- Verify ffmpeg is installed
+- Check network connection
 
-  Recent searches
-    Quick access to previously searched titles
+**Provider blocked**
+- Try different provider or region
+- Check internet connection
+- Try without VPN
 
-  Watchlist
-    Manage your anime watchlist with episode tracking and resume functionality
+## Advanced
 
-  Quick resume
-    Instantly play the next unwatched episode from your watchlist
+Enable debug logging:
+```bash
+DEBUG=true kittycli
+```
 
-  Providers
-    View status of all connected providers and their health metrics
+Custom API endpoint in `~/.kittycli/settings.json`:
+```json
+{
+  "apiBaseUrl": "https://your-backend.com"
+}
+```
 
-  Settings
-    Configure download format, quality, playback speed, audio preference, and more
+Default: `https://kittyapi.buzz`
 
-  Help
-    Display keyboard shortcuts and feature overview
+## License
 
-KEYBOARD NAVIGATION
+GPL-3.0
 
-  UP/DOWN arrows    Move through menu items
-  ENTER             Select current item
-  1-9               Quick-jump to visible item number
-  HOME/END          Jump to top or bottom of menu
-  PAGE UP/DOWN      Move by one page
-  Q/ESC             Go back in menu hierarchy
-  ?                 Show help screen
-  CTRL+C            Exit application
-
-BINGE MODE CONTROLS (between episodes)
-
-  Y or ENTER        Continue to next episode immediately
-  N                 Stop and return to menu
-  A                 Toggle between SUB and DUB audio
-
-CONFIGURATION
-
-Settings are stored in: ~/.kittycli/settings.json
-
-Configurable options:
-  bingeCountdownSeconds    Countdown between episodes (default: 8 seconds)
-  defaultAudio            Default audio preference (sub or dub)
-  playbackSpeed          Video playback speed (0.5x to 3.0x, default: 1.0x)
-  downloadFormat         Download format (mkv or mp4, default: mkv)
-  downloadConcurrency    Parallel downloads (1-5, default: 2)
-  resumePlayback         Auto-resume from last position (default: true)
-  preferredQuality       Quality selection (auto, 1080p, 720p, etc)
-  discordEnabled        Show Discord Rich Presence (default: false)
-
-DATA DIRECTORY
-
-  ~/.kittycli/
-    watchlist.json          Your anime watchlist and progress
-    search-history.json     Previously searched titles
-    settings.json           User configuration
-    progress.json           Playback position history
-    subs/                   Downloaded subtitle files
-    debug.log               Debug information (if enabled)
-
-ANILIST ID SUPPORT
-
-The application now supports direct streaming using AniList IDs for the fastest experience.
-
-When you select an anime to watch, it automatically detects the AniList ID and uses the optimized stream-direct endpoint for instant streaming across all 19 supported providers:
-  Miruro, MKissa, ReAnime, KickAssAnime, Animo, AniZone, Anikoto, AnimeGG, Senshi, Animetsu, AnimeOnsen, AllAnime, Nyanime, AniDao, Animeverse, AnimeHeaven, AniNeko, AnimeParadise, AniDB
-
-The stream-direct endpoint delivers:
-  Instant stream URLs (no multiple API calls)
-  Automatic quality selection
-  Built-in subtitle support
-  Response caching for faster repeated access
-
-ADVANCED SETTINGS
-
-To enable debug logging:
-  DEBUG=true kittycli
-
-To use a custom API endpoint:
-  Edit ~/.kittycli/settings.json and set apiBaseUrl to your backend server
-  
-  Default: https://kittyapi.buzz
-  Alternative backends are supported as long as they implement the stream-direct endpoint
-
-TROUBLESHOOTING
-
-Video won't play
-  Ensure mpv is installed and in your PATH
-  Check if the stream URL is still active
-  Try a different quality/provider
-  Increase FFmpeg analysis time in settings: mpvArgs: "--demuxer-lavf-o=analyzeduration=30000000,probesize=100000000,fflags=+discardcorrupt"
-
-Download errors
-  Check available disk space
-  Ensure ffmpeg is installed for HLS streams
-  Try downloading at a different time
-  Check the debug log for error details
-
-Provider issues
-  Some providers may be blocked in your region
-  Try switching to a different provider
-  Check your internet connection
-  Disable VPN if it interferes with provider access
-
-License
-  GPL-3.0
-
-For more information, visit: https://github.com/fampep/Kitty-cli
+For more info: https://github.com/fampep/Kitty-cli
