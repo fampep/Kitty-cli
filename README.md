@@ -78,6 +78,7 @@ Key options:
 - `resumePlayback` - auto-resume from last position
 - `discordEnabled` - show Discord presence
 - `preferredQuality` - auto, 1080p, 720p, etc
+- `mpvArgs` - extra mpv command-line arguments
 
 ## Data Directory
 
@@ -93,15 +94,34 @@ Key options:
 
 ## AniList ID Support
 
-The app uses AniList IDs for direct, instant streaming across all 19 supported providers.
+The app uses AniList IDs for direct, instant streaming across all **21 providers** via the stream-direct endpoint.
+
+### Stream-Direct Endpoint
+The fastest way to get video streams with a single API call:
+- Single call returns all available servers for an episode
+- Automatically handles HLS/MP4/MKV formats
+- Returns multiple server options to choose from
+- Includes subtitle tracks, quality info, and headers
+
+Example:
+```
+GET /provider/Miruro/stream-direct?anilistId=20&episode=1&audio=sub
+```
+
+Response includes:
+- Primary stream URL with headers (Referer, Origin)
+- `allServers` array with multiple CDN options
+- Quality information for each server
+- Subtitle tracks with language labels
+- Provider and server metadata
 
 When available, the CLI automatically:
-1. Uses the `/map` endpoint to resolve AniList ID to provider ID
-2. Calls `/stream-direct` for one-call streaming (fastest)
-3. Falls back to traditional search/episodes/servers flow if direct streaming unavailable
+1. Calls `/stream-direct` for one-call streaming (fastest)
+2. If multiple servers available, lets you select your preferred CDN
+3. Falls back to traditional search/episodes/servers flow if needed
 
-Supported providers with direct AniList streaming:
-Miruro, MKissa, ReAnime, KickAssAnime, Animo, AniZone, Anikoto, AnimeGG, Senshi, Animetsu, AnimeOnsen, AllAnime, Nyanime, AniDao, Animeverse, AnimeHeaven, AniNeko, AnimeParadise, KaaLt, AniDB
+Supported providers with direct AniList streaming (21 total):
+Miruro, MKissa, ReAnime, KickAssAnime, Animo, AniZone, Anikoto, AnimeGG, Senshi, Animetsu, AnimeOnsen, AllAnime, Nyanime, AniDao, Animeverse, AnimeHeaven, AniNeko, AnimeParadise, KaaLt, AniDB, Anineko
 
 ## Troubleshooting
 
