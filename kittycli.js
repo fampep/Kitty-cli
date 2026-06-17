@@ -35,7 +35,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.6.0";
+const APP_VERSION = "2.6.1";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
@@ -1275,6 +1275,19 @@ class ApiProvider {
         }
     }
 
+    async mapAnilistId(anilistId) {
+        try {
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/map`, {
+                params: { anilistId: String(anilistId) },
+                timeout: 8000
+            });
+            return response.data;
+        } catch (err) {
+            debugLog(`API error for ${this.name}.mapAnilistId:`, err.message);
+            return null;
+        }
+    }
+
     async extractStreamDirectByAnilistId(anilistId, episodeNumber, audio = 'sub') {
         try {
             const response = await axios.get(`${this.baseUrl}/provider/${this.name}/stream-direct`, {
@@ -1303,7 +1316,7 @@ async function fetchProviderList(apiBaseUrl) {
         return providers.filter(p => p.online).map(p => p.name);
     } catch (err) {
         debugLog("Failed to fetch provider list from API, using fallback list.");
-        return ["MKissa","Animo", "Miruro","Anikoto", "AnimeGG", "AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Animetsu", "AnimeParadise", "KickAssAnime"];
+        return ["MKissa","Animo", "Miruro","Anikoto", "AnimeGG", "GogoAnime","AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Anitaku", "Animetsu", "AnimeParadise", "KaaLt"];
     }
 }
 
@@ -1600,22 +1613,39 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         const start = await askNumber(`\n  ${C.yellow}Start episode (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
         const end = await askNumber(`  ${C.yellow}End episode (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
         const sampleProviderServersMap = new Map();
+        const batchAudioAvailability = new Map();
+
         for (const p of validLists) {
             const epObj = p.list.find(e => parseEpisodeNumber(e) === start);
             const dataIds = resolveEpisodeDataIds(epObj);
             if (dataIds) {
-                try { const servers = await p.provider.findAvailableServers(dataIds, audio); if (servers.length) sampleProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
+                try {
+                    const servers = await p.provider.findAvailableServers(dataIds, audio);
+                    if (servers.length) {
+                        sampleProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name })));
+                        batchAudioAvailability.set(p.provider.name, audio);
+                    } else {
+                        const altAudio = audio === "dub" ? "sub" : "dub";
+                        const altServers = await p.provider.findAvailableServers(dataIds, altAudio);
+                        if (altServers.length) {
+                            sampleProviderServersMap.set(p.provider, altServers.map(s => ({ id: s.id, name: s.name })));
+                            batchAudioAvailability.set(p.provider.name, altAudio);
+                        }
+                    }
+                } catch(e) {}
             }
         }
+
         if (sampleProviderServersMap.size === 0) { renderBox("Error", [`No servers for episode ${start}`], C.red); await wait(1500); return; }
         const selection = await selectServerTwoStep(sampleProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
         const { provider: selectedProvider, serverId } = selection;
 
+        const confirmedBatchAudio = batchAudioAvailability.get(selectedProvider.name) || audio;
         let selectedQuality = null;
         let sampleStream = null;
         if (anilistIdForWorker) {
-            sampleStream = await withSpinner(`Fetching stream info for quality selection (direct)...`, async () => await selectedProvider.extractStreamDirectByAnilistId(anilistIdForWorker, start, audio));
+            sampleStream = await withSpinner(`Fetching stream info for quality selection (direct)...`, async () => await selectedProvider.extractStreamDirectByAnilistId(anilistIdForWorker, start, confirmedBatchAudio));
         }
         if (!sampleStream) {
             sampleStream = await withSpinner(`Fetching stream info for quality selection...`, async () => await selectedProvider.extractStreamFromLinkId(serverId));
@@ -1634,19 +1664,37 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
 
     if (isDownloadMode) {
         const downloadProviderServersMap = new Map();
+        const downloadAudioAvailability = new Map();
+
         for (const p of validLists) {
             const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
             const dataIds = resolveEpisodeDataIds(epObj);
             if (dataIds) {
-                try { const servers = await p.provider.findAvailableServers(dataIds, audio); if (servers.length) downloadProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
+                try {
+                    const servers = await p.provider.findAvailableServers(dataIds, audio);
+                    if (servers.length) {
+                        downloadProviderServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name })));
+                        downloadAudioAvailability.set(p.provider.name, audio);
+                    } else {
+                        const altAudio = audio === "dub" ? "sub" : "dub";
+                        const altServers = await p.provider.findAvailableServers(dataIds, altAudio);
+                        if (altServers.length) {
+                            downloadProviderServersMap.set(p.provider, altServers.map(s => ({ id: s.id, name: s.name })));
+                            downloadAudioAvailability.set(p.provider.name, altAudio);
+                        }
+                    }
+                } catch(e) {}
             }
         }
+
         if (downloadProviderServersMap.size === 0) { renderBox("Error", ["No download links found."], C.red); await wait(1500); return; }
         const selection = await selectServerTwoStep(downloadProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
+
+        const confirmedDownloadAudio = downloadAudioAvailability.get(selection.provider.name) || audio;
         let stream = null;
         if (anilistIdForWorker) {
-            stream = await withSpinner(`Fetching stream from ${selection.provider.name} (direct)...`, async () => await selection.provider.extractStreamDirectByAnilistId(anilistIdForWorker, targetEpisode, audio));
+            stream = await withSpinner(`Fetching stream from ${selection.provider.name} (direct)...`, async () => await selection.provider.extractStreamDirectByAnilistId(anilistIdForWorker, targetEpisode, confirmedDownloadAudio));
         }
         if (!stream) {
             stream = await withSpinner(`Fetching stream from ${selection.provider.name}...`, async () => await selection.provider.extractStreamFromLinkId(selection.serverId));
@@ -1675,14 +1723,47 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     let userWantsToContinue = true, preferredProviderName = null, preferredServerName = null, currentAudio = audio;
     while (targetEpisode <= maxEpNum && userWantsToContinue) {
         const providerServersMap = new Map();
+        const audioAvailability = new Map();
+
         for (const p of validLists) {
             const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
             const dataIds = resolveEpisodeDataIds(epObj);
             if (dataIds) {
-                try { const servers = await p.provider.findAvailableServers(dataIds, currentAudio); if (servers.length) providerServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name }))); } catch(e) {}
+                try {
+                    const servers = await p.provider.findAvailableServers(dataIds, currentAudio);
+                    if (servers.length) {
+                        providerServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name })));
+                        audioAvailability.set(p.provider.name, currentAudio);
+                    } else {
+                        const altAudio = currentAudio === "dub" ? "sub" : "dub";
+                        const altServers = await p.provider.findAvailableServers(dataIds, altAudio);
+                        if (altServers.length) {
+                            audioAvailability.set(p.provider.name, altAudio);
+                        }
+                    }
+                } catch(e) {}
             }
         }
-        if (providerServersMap.size === 0) { renderBox("Error", [`No servers for episode ${targetEpisode}`], C.red); break; }
+
+        if (providerServersMap.size === 0) {
+            const altAudio = currentAudio === "dub" ? "sub" : "dub";
+            for (const p of validLists) {
+                const epObj = p.list.find(e => parseEpisodeNumber(e) === targetEpisode);
+                const dataIds = resolveEpisodeDataIds(epObj);
+                if (dataIds) {
+                    try {
+                        const servers = await p.provider.findAvailableServers(dataIds, altAudio);
+                        if (servers.length) {
+                            providerServersMap.set(p.provider, servers.map(s => ({ id: s.id, name: s.name })));
+                            audioAvailability.set(p.provider.name, altAudio);
+                        }
+                    } catch(e) {}
+                }
+            }
+            if (providerServersMap.size === 0) { renderBox("Error", [`No servers for episode ${targetEpisode}`], C.red); break; }
+            currentAudio = altAudio;
+            console.log(`  ${C.yellow}⚠ ${currentAudio.toUpperCase()} not available, using ${(currentAudio === "dub" ? "DUB" : "SUB")}${C.reset}`);
+        }
         
         let selectedProvider = null, selectedServerId = null, selectedServerName = null;
         if (preferredProviderName && preferredServerName) {
@@ -1700,9 +1781,10 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         if (!selectedProvider || !selectedServerId) { renderBox("Error", ["No server selected."], C.red); break; }
         
         try {
+            const confirmedAudio = audioAvailability.get(selectedProvider.name) || currentAudio;
             let stream = null;
             if (anilistIdForWorker) {
-                stream = await withSpinner(`Fetching stream from ${selectedProvider.name} (direct)...`, async () => await selectedProvider.extractStreamDirectByAnilistId(anilistIdForWorker, targetEpisode, currentAudio));
+                stream = await withSpinner(`Fetching stream from ${selectedProvider.name} (direct)...`, async () => await selectedProvider.extractStreamDirectByAnilistId(anilistIdForWorker, targetEpisode, confirmedAudio));
             }
             if (!stream) {
                 stream = await withSpinner(`Fetching stream from ${selectedProvider.name}...`, async () => await selectedProvider.extractStreamFromLinkId(selectedServerId));

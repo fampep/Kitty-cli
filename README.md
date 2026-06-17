@@ -95,6 +95,14 @@ Key options:
 
 The app uses AniList IDs for direct, instant streaming across all 19 supported providers.
 
+When available, the CLI automatically:
+1. Uses the `/map` endpoint to resolve AniList ID to provider ID
+2. Calls `/stream-direct` for one-call streaming (fastest)
+3. Falls back to traditional search/episodes/servers flow if direct streaming unavailable
+
+Supported providers with direct AniList streaming:
+Miruro, MKissa, ReAnime, KickAssAnime, Animo, AniZone, Anikoto, AnimeGG, Senshi, Animetsu, AnimeOnsen, AllAnime, Nyanime, AniDao, Animeverse, AnimeHeaven, AniNeko, AnimeParadise, KaaLt, AniDB
+
 ## Troubleshooting
 
 **Video won't play**
