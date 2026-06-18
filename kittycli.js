@@ -885,7 +885,7 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress, 
     }
 
     if (!partial) {
-        renderBox("saving to", [downloadPath], C.cyan);
+        renderBox(t('boxes.savingTo'), [downloadPath], C.cyan);
         const headers = { Referer: serverDetails.headers?.Referer || serverDetails.referer || '', Origin: serverDetails.headers?.Origin || serverDetails.origin || '' };
         partial = { url: serverDetails.file, outputPath: downloadPath, downloadedBytes: 0, totalBytes: 0, headers: headers };
     }
@@ -960,7 +960,7 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress, 
             response.data.on('error', (err) => { fs.writeFileSync(metaPath, JSON.stringify(pd, null, 2)); reject(err); });
         });
     } catch (err) {
-        renderBox("download error", [err.message], C.red);
+        renderBox(t('boxes.downloadError'), [err.message], C.red);
         return false;
     }
 }
@@ -1136,7 +1136,7 @@ async function showHelp() {
         ``,
         `${C.dim}Press any key to return${C.reset}`
     ];
-    renderBox("Help & Features", content, C.cyan);
+    renderBox(t('boxes.help'), content, C.cyan);
     await pauseForKey();
 }
 
@@ -1199,7 +1199,7 @@ async function checkApiServer(baseUrl) {
         return true;
     } catch (err) {
         debugLog(`API health check failed: ${err.message}`);
-        renderBox("connection error", [`Cannot reach ${baseUrl}`, "Check the server is running and the URL is correct.", "", `${C.dim}You can change the API URL in settings.${C.reset}`], C.red);
+        renderBox(t('boxes.connectionError'), [`Cannot reach ${baseUrl}`, "Check the server is running and the URL is correct.", "", `${C.dim}You can change the API URL in settings.${C.reset}`], C.red);
         return false;
     }
 }
@@ -1351,12 +1351,12 @@ async function createProviders(apiBaseUrl) {
 async function selectServerTwoStep(providerServersMap, audioLabelText, statusBar) {
     if (providerServersMap.size === 0) return null;
     const providerEntries = Array.from(providerServersMap.entries());
-    const providerOptions = providerEntries.map(([prov, servers]) => `${C.bold}${prov.name}${C.reset}  ${C.dim}${servers.length} server${servers.length !== 1 ? 's' : ''}${C.reset}`);
-    const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ Select source${C.reset}  ${C.dim}(${audioLabelText})${C.reset}`, { allowBack: true, statusBar });
+    const providerOptions = providerEntries.map(([prov, servers]) => `${C.bold}${prov.name}${C.reset}  ${C.dim}${servers.length} ${servers.length !== 1 ? t('labels.servers') : t('labels.server')}${C.reset}`);
+    const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.selectSource')}${C.reset}  ${C.dim}(${audioLabelText})${C.reset}`, { allowBack: true, statusBar });
     if (providerIdx < 0) return null;
     const [selectedProvider, servers] = providerEntries[providerIdx];
     const serverOptions = servers.map(s => s.name);
-    const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedProvider.name}${C.reset}  ${C.dim}Select server${C.reset}`, { allowBack: true, statusBar });
+    const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedProvider.name}${C.reset}  ${C.dim}${t('menus.selectServer')}${C.reset}`, { allowBack: true, statusBar });
     if (serverIdx < 0) return null;
     return { provider: selectedProvider, serverId: servers[serverIdx].id, serverName: servers[serverIdx].name };
 }
@@ -1370,7 +1370,7 @@ async function selectEpisodeSimple(maxEpNum, totalEpisodes, _, statusBar) {
         episodeOptions.push(label);
     }
 
-    const headerText = `\n  ${C.bold}${C.cyan}◈ ${t('episodes.select')}${C.reset}  ${C.dim}${maxEpNum} episodes${C.reset}`;
+    const headerText = `\n  ${C.bold}${C.cyan}◈ ${t('episodes.select')}${C.reset}  ${C.dim}${maxEpNum} ${t('labels.episodes')}${C.reset}`;
     const pickedEpIdx = await selectMenuOption(episodeOptions, headerText, { allowBack: true, statusBar });
     return pickedEpIdx >= 0 ? pickedEpIdx + 1 : -1;
 }
@@ -1382,7 +1382,7 @@ async function batchDownloadQueueStreamDirect(jobs, coreTitle, statusBar, select
     const ext = settings.downloadFormat;
 
     renderBox(t('download.batchDownload'), [
-        `${C.bold}${jobs.length}${C.reset} episodes queued`,
+        `${C.bold}${jobs.length}${C.reset} ${t('labels.episodes')} ${t('messages.queuedForDownload')}`,
         `${C.dim}Format: ${ext.toUpperCase()}${C.reset}`,
         `${C.dim}Quality: ${selectedQuality || 'auto'}${C.reset}`,
     ], C.cyan);
@@ -1455,7 +1455,7 @@ async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBa
         episodeOptions.push(`${marker}  ${label}`);
     }
 
-    let headerText = `\n  ${C.bold}${C.cyan}◈ Episode Select${C.reset}  ${C.dim}${maxEpNum} episodes${C.reset}`;
+    let headerText = `\n  ${C.bold}${C.cyan}◈ ${t('boxes.episodeSelect')}${C.reset}  ${C.dim}${maxEpNum} ${t('labels.episodes')}${C.reset}`;
     if (seasonInfo && (seasonInfo.season || seasonInfo.seasonYear)) {
         const seasonDisplay = [];
         if (seasonInfo.season) {
@@ -1514,9 +1514,9 @@ async function showMetadataPanel(title) {
         }
         renderBox(`${seasonEmoji} ${title}`, content, C.green);
     } else {
-        renderBox("Info", [`No metadata found for "${title}".`], C.dim);
+        renderBox(t('app.info'), [`${t('labels.noMetadata')} "${title}".`], C.dim);
     }
-    console.log(`\n  ${C.dim}1 continue  2 back${C.reset}`);
+    console.log(`\n  ${C.dim}1 ${t('labels.continue')}  2 ${t('labels.back')}${C.reset}`);
     const answer = await askQuestion(`\n  ${C.bold}${C.yellow}›${C.reset} `);
     return answer.trim() === '1' ? metadata : null;
 }
@@ -1599,7 +1599,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
     let audio = settings.defaultAudio;
 
     if (hasSub && hasDub) {
-        const audioIdx = await selectMenuOption([`${C.cyan}${t('audio.sub')}${C.reset}  Subtitled`, `${C.magenta}${t('audio.dub')}${C.reset}  Dubbed`], `\n  ${C.bold}${C.cyan}◈ ${t('audio.selectAudio')}${C.reset}`, { allowBack: true, statusBar });
+        const audioIdx = await selectMenuOption([`${C.cyan}${t('audio.sub')}${C.reset}  ${t('audio.subtitled')}`, `${C.magenta}${t('audio.dub')}${C.reset}  ${t('audio.dubbed')}`], `\n  ${C.bold}${C.cyan}◈ ${t('audio.selectAudio')}${C.reset}`, { allowBack: true, statusBar });
         if (audioIdx === 1) audio = "dub";
         else if (audioIdx < 0) return;
     } else if (!hasSub && hasDub) audio = "dub";
@@ -1607,11 +1607,11 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 
     let isDownloadMode = false, isBatchMode = false;
     const actionOptions = [
-        `${C.green}▶${C.reset}  Stream online`,
-        `${C.cyan}⬇${C.reset}  Download single episode`,
-        `${C.magenta}⬇⬇${C.reset} Batch download (${C.bold}MKV${C.reset})`
+        `${C.green}▶${C.reset}  ${t('actions.streamOnline')}`,
+        `${C.cyan}⬇${C.reset}  ${t('actions.downloadSingleEpisode')}`,
+        `${C.magenta}⬇⬇${C.reset} ${t('actions.batchDownload')} (${C.bold}MKV${C.reset})`
     ];
-    const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ What would you like to do?${C.reset}`, { allowBack: true, statusBar });
+    const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.whatWouldYouLikeToDo')}${C.reset}`, { allowBack: true, statusBar });
     if (actionIdx < 0) return;
     switch (actionIdx) {
         case 0: isDownloadMode = false; break;
@@ -1629,7 +1629,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
     }
 
     if (!anilistId) {
-        renderBox("Error", ["Could not resolve AniList ID for this anime. Using legacy flow..."], C.yellow);
+        renderBox(t('app.error'), [t('boxes.couldNotResolveAnilist')], C.yellow);
         await wait(2000);
         // Fall back to traditional flow
         await handleAnimeSelection(selectedMatches);
@@ -1658,8 +1658,8 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
     }
 
     if (isDownloadMode && isBatchMode) {
-        const start = await askNumber(`\n  ${C.yellow}Start episode (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
-        const end = await askNumber(`  ${C.yellow}End episode (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
+        const start = await askNumber(`\n  ${C.yellow}${t('labels.startEpisode')} (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
+        const end = await askNumber(`  ${C.yellow}${t('labels.endEpisode')} (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
 
         // For batch, fetch from all providers to show combined selector
         let selectedProvider = null;
@@ -1698,7 +1698,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
             const sampleStream = allProviderStreams[0].stream;
             if (sampleStream && sampleStream.qualities && sampleStream.qualities.length > 1) {
                 const qualityOptions = sampleStream.qualities.map(q => `${q}`);
-                const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+                const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectQuality')}${C.reset}`, { allowBack: true, statusBar });
                 if (qualityIdx >= 0) selectedQuality = sampleStream.qualities[qualityIdx];
             }
         } else {
@@ -1731,7 +1731,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
         });
 
         if (allProviderStreams.length === 0) {
-            renderBox("Error", ["Failed to fetch stream from any provider. Falling back to legacy flow..."], C.red);
+            renderBox(t('app.error'), [t('boxes.failedToFetchStream')], C.red);
             await wait(1500);
             await handleAnimeSelection(selectedMatches);
             return;
@@ -1747,7 +1747,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
                 const format = stream.file.includes('.m3u8') ? 'HLS' : 'MP4';
                 return `${provider.name} • ${qualityStr} • ${format}`;
             });
-            const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ Select provider${C.reset}`, { allowBack: true, statusBar });
+            const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectProvider')}${C.reset}`, { allowBack: true, statusBar });
             if (providerIdx < 0) return;
             selectedStream = allProviderStreams[providerIdx].stream;
             selectedProvider = allProviderStreams[providerIdx].provider;
@@ -1767,7 +1767,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
         let selectedQuality = null;
         if (selectedStream.qualities && selectedStream.qualities.length > 1) {
             const qualityOptions = selectedStream.qualities.map(q => `${q}`);
-            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectQuality')}${C.reset}`, { allowBack: true, statusBar });
             if (qualityIdx >= 0) {
                 selectedQuality = selectedStream.qualities[qualityIdx];
                 if (selectedStream.qualityUrls && selectedStream.qualityUrls[selectedQuality]) {
@@ -1843,11 +1843,11 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
                     const preview = s.file.substring(0, 50);
                     return `${C.cyan}${quality}${C.reset}  ${C.dim}${preview}${s.file.length > 50 ? '...' : ''}${C.reset}`;
                 });
-                const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ Multiple servers available - select one${C.reset}`, { allowBack: false, statusBar });
+                const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.multipleServersAvailable')}${C.reset}`, { allowBack: false, statusBar });
                 if (serverIdx >= 0 && selectedStream.allServers[serverIdx]) {
                     selectedStream.file = selectedStream.allServers[serverIdx].file;
                     if (selectedStream.allServers[serverIdx].headers) selectedStream.headers = selectedStream.allServers[serverIdx].headers;
-                    console.log(`  ${C.dim}Selected server: ${selectedStream.allServers[serverIdx].quality || `Server ${serverIdx+1}`}${C.reset}`);
+                    console.log(`  ${C.dim}${t('boxes.selectedServer')}: ${selectedStream.allServers[serverIdx].quality || `Server ${serverIdx+1}`}${C.reset}`);
                 }
             }
 
@@ -1863,7 +1863,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
             else streamInfo.push(`${C.dim}Format:${C.reset} ${selectedStream.file.split('.').pop().toUpperCase()}`);
             if (selectedStream.allServers) streamInfo.push(`${C.dim}Available Servers:${C.reset} ${selectedStream.allServers.length}`);
             if (selectedStream.tracks && selectedStream.tracks.length > 0) streamInfo.push(`${C.dim}Subtitles:${C.reset} ${selectedStream.tracks.length} track(s)`);
-            renderBox("▶ Stream Ready", streamInfo, C.cyan);
+            renderBox(`▶ ${t('boxes.streamReady')}`, streamInfo, C.cyan);
 
             let selectedQuality = null;
             if (selectedStream.qualities && selectedStream.qualities.length > 1) {
@@ -1875,7 +1875,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
             }
 
             if (selectedStream.tracks && selectedStream.tracks.length > 0) {
-                const subChoice = await selectMenuOption(["Download subtitles", "Skip"], `\n  ${C.bold}Subtitles available${C.reset}`, { allowBack: false });
+                const subChoice = await selectMenuOption([t('actions.downloadSubtitles'), t('actions.skip')], `\n  ${C.bold}${t('streaming.selectSubtitles')}${C.reset}`, { allowBack: false });
                 if (subChoice === 0) {
                     const subsDir = path.join(DATA_DIR, 'subs', animeTitle.replace(/[<>:"/\\|?*]/g, '_'));
                     for (const sub of selectedStream.tracks) {
@@ -1908,7 +1908,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
                 `${C.dim}${selectedProvider.name}  ${audioTag}  ${speedInfo}${qualityTag ? '  ' + qualityTag : ''}${C.reset}`
             ];
 
-            renderBox("▶ Now Playing", boxContent, C.green);
+            renderBox(`▶ ${t('boxes.nowPlaying')}`, boxContent, C.green);
 
             saveToWatchlist(animeTitle, targetEpisode, audio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistId, 0, selectedQuality);
             await playWithMpv(selectedStream, `${animeTitle} — ${playingTitle}`, settings, animeTitle, targetEpisode, effectiveTotalEpisodes, audio, selectedProvider.name, 'stream-direct');
@@ -1948,7 +1948,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     let audio = lockedAudio || settings.defaultAudio;
     
     if (!lockedAudio && hasSub && hasDub) {
-        const audioIdx = await selectMenuOption([`${C.cyan}SUB${C.reset}  Subtitled`, `${C.magenta}DUB${C.reset}  Dubbed`], `\n  ${C.bold}${C.cyan}◈ Audio track${C.reset}`, { allowBack: true, statusBar });
+        const audioIdx = await selectMenuOption([`${C.cyan}SUB${C.reset}  ${t('audio.subtitled')}`, `${C.magenta}DUB${C.reset}  ${t('audio.dubbed')}`], `\n  ${C.bold}${C.cyan}◈ ${t('menus.audioTrack')}${C.reset}`, { allowBack: true, statusBar });
         if (audioIdx === 1) audio = "dub";
         else if (audioIdx < 0) return;
     } else if (!lockedAudio && !hasSub && hasDub) audio = "dub";
@@ -1956,11 +1956,11 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
 
     let isDownloadMode = false, isBatchMode = false;
     const actionOptions = [
-        `${C.green}▶${C.reset}  Stream online`,
-        `${C.cyan}⬇${C.reset}  Download single episode`,
-        `${C.magenta}⬇⬇${C.reset} Batch download (${C.bold}MKV${C.reset})`
+        `${C.green}▶${C.reset}  ${t('actions.streamOnline')}`,
+        `${C.cyan}⬇${C.reset}  ${t('actions.downloadSingleEpisode')}`,
+        `${C.magenta}⬇⬇${C.reset} ${t('actions.batchDownload')} (${C.bold}MKV${C.reset})`
     ];
-    const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ What would you like to do?${C.reset}`, { allowBack: true, statusBar });
+    const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.whatWouldYouLikeToDo')}${C.reset}`, { allowBack: true, statusBar });
     if (actionIdx < 0) return;
     switch (actionIdx) {
         case 0: isDownloadMode = false; break;
@@ -1987,11 +1987,11 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     }
     
     const validLists = providerEpLists.filter(p => p.list && p.list.length > 0);
-    if (!validLists.length) { renderBox("No Episodes", ["No episodes returned from any provider."], C.red); await wait(2000); return; }
-    
+    if (!validLists.length) { renderBox(t('boxes.noEpisodes'), [t('boxes.noEpisodesReturned')], C.red); await wait(2000); return; }
+
     let maxEpNum = 0;
     for (const p of validLists) for (const ep of p.list) { const num = parseEpisodeNumber(ep); if (num && num > maxEpNum) maxEpNum = num; }
-    if (maxEpNum === 0) { renderBox("Error", ["Invalid episode numbers."], C.red); await wait(1500); return; }
+    if (maxEpNum === 0) { renderBox(t('app.error'), [t('boxes.invalidEpisodes')], C.red); await wait(1500); return; }
 
     const watchInfo = getWatchlistInfo(coreTitle);
     let effectiveTotalEpisodes = watchInfo?.totalEpisodes ?? null;
@@ -2030,8 +2030,8 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
     }
 
     if (isDownloadMode && isBatchMode) {
-        const start = await askNumber(`\n  ${C.yellow}Start episode (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
-        const end = await askNumber(`  ${C.yellow}End episode (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
+        const start = await askNumber(`\n  ${C.yellow}${t('labels.startEpisode')} (1–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, 1, maxEpNum);
+        const end = await askNumber(`  ${C.yellow}${t('labels.endEpisode')} (${start}–${maxEpNum})${C.reset}  ${C.bold}›${C.reset} `, start, maxEpNum);
         const sampleProviderServersMap = new Map();
         const batchAudioAvailability = new Map();
 
@@ -2056,7 +2056,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             }
         }
 
-        if (sampleProviderServersMap.size === 0) { renderBox("Error", [`No servers for episode ${start}`], C.red); await wait(1500); return; }
+        if (sampleProviderServersMap.size === 0) { renderBox(t('app.error'), [t('boxes.noServers')], C.red); await wait(1500); return; }
         const selection = await selectServerTwoStep(sampleProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
         const { provider: selectedProvider, serverId } = selection;
@@ -2072,7 +2072,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         }
         if (sampleStream.qualities && sampleStream.qualities.length > 1) {
             const qualityOptions = sampleStream.qualities.map(q => `${q}`);
-            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectQuality')}${C.reset}`, { allowBack: true, statusBar });
             if (qualityIdx >= 0) selectedQuality = sampleStream.qualities[qualityIdx];
         }
 
@@ -2107,7 +2107,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             }
         }
 
-        if (downloadProviderServersMap.size === 0) { renderBox("Error", ["No download links found."], C.red); await wait(1500); return; }
+        if (downloadProviderServersMap.size === 0) { renderBox(t('app.error'), [t('boxes.noDownloadLinks')], C.red); await wait(1500); return; }
         const selection = await selectServerTwoStep(downloadProviderServersMap, audio === "sub" ? "SUB" : "DUB", statusBar);
         if (!selection) return;
 
@@ -2124,7 +2124,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
         let selectedQuality = null;
         if (stream.qualities && stream.qualities.length > 1) {
             const qualityOptions = stream.qualities.map(q => `${q}`);
-            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ Select quality${C.reset}`, { allowBack: true, statusBar });
+            const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectQuality')}${C.reset}`, { allowBack: true, statusBar });
             if (qualityIdx >= 0) {
                 selectedQuality = stream.qualities[qualityIdx];
                 if (stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
@@ -2180,7 +2180,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
                     } catch(e) {}
                 }
             }
-            if (providerServersMap.size === 0) { renderBox("Error", [`No servers for episode ${targetEpisode}`], C.red); break; }
+            if (providerServersMap.size === 0) { renderBox(t('app.error'), [t('boxes.noServers')], C.red); break; }
             currentAudio = altAudio;
             console.log(`  ${C.yellow}⚠ ${currentAudio.toUpperCase()} not available, using ${(currentAudio === "dub" ? "DUB" : "SUB")}${C.reset}`);
         }
@@ -2198,7 +2198,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             selectedProvider = selection.provider; selectedServerId = selection.serverId; selectedServerName = selection.serverName;
             preferredProviderName = selectedProvider.name; preferredServerName = selectedServerName;
         }
-        if (!selectedProvider || !selectedServerId) { renderBox("Error", ["No server selected."], C.red); break; }
+        if (!selectedProvider || !selectedServerId) { renderBox(t('app.error'), [t('boxes.noServerSelected')], C.red); break; }
         
         try {
             const confirmedAudio = audioAvailability.get(selectedProvider.name) || currentAudio;
@@ -2216,7 +2216,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
 
             if (stream.allServers && stream.allServers.length > 1) {
                 const serverOptions = stream.allServers.map((s, i) => `${C.cyan}${s.quality || `Server ${i+1}`}${C.reset}  ${s.file.substring(0, 60)}${s.file.length > 60 ? '...' : ''}`);
-                const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ Multiple servers available - select one${C.reset}`, { allowBack: false, statusBar });
+                const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.multipleServersAvailable')}${C.reset}`, { allowBack: false, statusBar });
                 if (serverIdx >= 0 && stream.allServers[serverIdx]) {
                     stream.file = stream.allServers[serverIdx].file;
                     if (stream.allServers[serverIdx].headers) stream.headers = stream.allServers[serverIdx].headers;
@@ -2234,7 +2234,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             else streamInfo.push(`${C.dim}Format:${C.reset} ${stream.file.split('.').pop().toUpperCase()}`);
             if (stream.allServers) streamInfo.push(`${C.dim}Total Servers:${C.reset} ${stream.allServers.length}`);
             if (stream.tracks && stream.tracks.length > 0) streamInfo.push(`${C.dim}Subtitles:${C.reset} ${stream.tracks.length} track(s)`);
-            renderBox("▶ Stream Ready", streamInfo, C.cyan);
+            renderBox(`▶ ${t('boxes.streamReady')}`, streamInfo, C.cyan);
 
             let selectedQuality = null;
             if (stream.qualities && stream.qualities.length > 1) {
@@ -2303,7 +2303,7 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             infoParts.push(speedInfo);
             boxContent.push(`${C.dim}${infoParts.join(`  ${C.dim}·${C.reset}  `)}${C.reset}`);
 
-            renderBox("▶ Now Playing", boxContent, C.green);
+            renderBox(`▶ ${t('boxes.nowPlaying')}`, boxContent, C.green);
 
             saveToWatchlist(coreTitle, targetEpisode, currentAudio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistIdForWorker, 0, selectedQuality, seasonInfo);
             await playWithMpv(stream, `${coreTitle} — ${playingTitle}`, settings, coreTitle, targetEpisode, effectiveTotalEpisodes, currentAudio, selectedProvider.name, selectedServerName);
@@ -2336,14 +2336,14 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
 
 async function triggerQuickResume(providersList) {
     const list = loadWatchlist();
-    if (list.length === 0) { renderBox("Info", ["Watchlist is empty. Nothing to resume."], C.dim); await wait(1200); return; }
+    if (list.length === 0) { renderBox(t('app.info'), [t('boxes.watchlistEmptyMessage')], C.dim); await wait(1200); return; }
     const last = list[0];
     const mappedMatches = [];
     for (const match of last.matches) {
         const foundProvider = providersList.find(p => p.name === match.providerName);
         if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: last.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
     }
-    if (mappedMatches.length === 0) { renderBox("Error", ["Cannot restore provider data for last watch."], C.red); await wait(1500); return; }
+    if (mappedMatches.length === 0) { renderBox(t('app.error'), [t('boxes.cannotRestoreProvider')], C.red); await wait(1500); return; }
     await handleAnimeSelection(mappedMatches, last.lastEpisode + 1, last.audio);
 }
 
@@ -2352,7 +2352,7 @@ async function triggerRecentSearchesWorkflow(providersList) {
     if (history.length === 0) {
         clearScreen();
         renderHeader("RECENT SEARCHES", "");
-        renderBox("Info", ["No searches saved yet."], C.dim);
+        renderBox(t('app.info'), [t('boxes.noSearchesSaved')], C.dim);
         await pauseForKey();
         return;
     }
@@ -2361,7 +2361,7 @@ async function triggerRecentSearchesWorkflow(providersList) {
     if (selectedIdx < 0 || selectedIdx === history.length + 1) return;
     if (selectedIdx === history.length) {
         const confirm = await selectMenuOption(["Yes, clear all", "No, go back"], `\n  ${C.bold}${C.red}Clear all recent searches?${C.reset}`, { allowBack: true });
-        if (confirm === 0) { clearSearchHistory(); renderBox("Done", ["Searches cleared."], C.green); }
+        if (confirm === 0) { clearSearchHistory(); renderBox(t('boxes.done'), [t('boxes.searchesCleared')], C.green); }
         await wait(1000);
         return;
     }
@@ -2370,7 +2370,7 @@ async function triggerRecentSearchesWorkflow(providersList) {
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${selectedQuery}${C.reset}`, { allowBack: true });
     switch (actionIdx) {
         case 0: await triggerSearchWorkflow(selectedQuery, providersList); break;
-        case 1: deleteSearchHistoryItem(selectedIdx); renderBox("Done", ["Search deleted."], C.green); await wait(800); break;
+        case 1: deleteSearchHistoryItem(selectedIdx); renderBox(t('boxes.done'), [t('boxes.searchDeleted')], C.green); await wait(800); break;
     }
 }
 
@@ -2380,7 +2380,7 @@ async function triggerWatchlistWorkflow(providersList) {
     if (list.length === 0) {
         clearScreen();
         renderHeader("WATCHLIST", "");
-        renderBox("Info", ["Watchlist is empty.", "Start watching to build your history."], C.dim);
+        renderBox(t('app.info'), [t('boxes.watchlistEmptyStart')], C.dim);
         await wait(2000);
         return;
     }
@@ -2415,7 +2415,7 @@ async function triggerWatchlistWorkflow(providersList) {
     if (selectedIdx < 0) return;
     if (selectedIdx === list.length) {
         const confirm = await selectMenuOption(["Yes, clear all", "No, go back"], `\n  ${C.bold}${C.red}Clear entire watchlist?${C.reset}`, { allowBack: true });
-        if (confirm === 0) { clearWatchlist(); renderBox("Done", ["Watchlist cleared."], C.green); }
+        if (confirm === 0) { clearWatchlist(); renderBox(t('boxes.done'), [t('messages.removedFromWatchlist')], C.green); }
         await wait(1200);
         return;
     }
@@ -2448,42 +2448,42 @@ async function triggerWatchlistWorkflow(providersList) {
                     list[idx].totalEpisodes = totalData.totalEpisodes;
                     if (totalData.anilistId) list[idx].anilistId = totalData.anilistId;
                     saveWatchlist(list);
-                    renderBox("Updated", [`Total episodes set to ${totalData.totalEpisodes}`], C.green);
-                } else { renderBox("Error", ["Entry not found."], C.red); }
-            } else { renderBox("Error", ["Could not fetch total episodes."], C.red); }
+                    renderBox(t('boxes.updated'), [`Total episodes set to ${totalData.totalEpisodes}`], C.green);
+                } else { renderBox(t('app.error'), ["Entry not found."], C.red); }
+            } else { renderBox(t('app.error'), ["Could not fetch total episodes."], C.red); }
             await wait(1200);
             break;
         case 8:
             deleteWatchlistItem(selectedIdx);
-            renderBox("Done", ["Removed from watchlist."], C.green);
+            renderBox(t('boxes.done'), [t('boxes.removed')], C.green);
             await wait(1000);
             break;
         case 4:
             const newAudio = targetItem.audio === "sub" ? "dub" : "sub";
             updateWatchlistAudio(targetItem.title, newAudio);
-            renderBox("Updated", [`Audio switched to ${newAudio.toUpperCase()}`], C.green);
+            renderBox(t('boxes.updated'), [t('boxes.audioSwitched') + ` ${newAudio.toUpperCase()}`], C.green);
             await wait(1000);
             break;
         case 5:
             if (targetItem.totalEpisodes && targetItem.totalEpisodes > 0) {
                 updateWatchlistEpisode(targetItem.title, targetItem.totalEpisodes);
-                renderBox("Done", [`${targetItem.title} marked as completed`], C.green);
+                renderBox(t('boxes.done'), [`${targetItem.title} ${t('boxes.markedCompleted')}`], C.green);
             } else {
                 const manualEp = await askNumber(`\n  ${C.yellow}Final episode number${C.reset}  ${C.bold}›${C.reset} `, 1, 9999);
                 updateWatchlistEpisode(targetItem.title, manualEp);
-                renderBox("Done", [`Last episode set to ${manualEp}`], C.green);
+                renderBox(t('boxes.done'), [t('boxes.lastEpisodeSet') + ` ${manualEp}`], C.green);
             }
             await wait(1200);
             break;
         case 6:
             updateWatchlistEpisode(targetItem.title, 0);
-            renderBox("Updated", [`${targetItem.title} marked as unwatched`], C.green);
+            renderBox(t('boxes.updated'), [`${targetItem.title} ${t('boxes.markedUnwatched')}`], C.green);
             await wait(1000);
             break;
         case 3:
             const newEp = await askNumber(`\n  ${C.yellow}New last watched episode (current: ${targetItem.lastEpisode})${C.reset}  ${C.bold}›${C.reset} `, 0, 9999);
             updateWatchlistEpisode(targetItem.title, newEp);
-            renderBox("Updated", [`Episode progress → ${newEp}`], C.green);
+            renderBox(t('boxes.updated'), [t('boxes.episodeProgress') + ` ${newEp}`], C.green);
             await wait(1000);
             break;
         default:
@@ -2492,7 +2492,7 @@ async function triggerWatchlistWorkflow(providersList) {
                 const foundProvider = providersList.find(p => p.name === match.providerName);
                 if (foundProvider) mappedMatches.push({ provider: foundProvider, item: { title: targetItem.title, url: match.url, hasSub: match.hasSub, hasDub: match.hasDub } });
             }
-            if (mappedMatches.length === 0) { renderBox("Error", ["Failed to restore provider data."], C.red); await wait(1500); return; }
+            if (mappedMatches.length === 0) { renderBox(t('app.error'), [t('boxes.failedToRestoreProvider')], C.red); await wait(1500); return; }
             let startEpisode = 1;
             if (actionIdx === 0) startEpisode = targetItem.lastEpisode + 1;
             else if (actionIdx === 1) startEpisode = targetItem.lastEpisode;
@@ -2506,37 +2506,37 @@ async function triggerSettingsWorkflow(providersCount) {
     while (true) {
         const settings = loadSettings();
         const options = [
-            `Language          ${C.dim}${getLanguageName(settings.language)}${C.reset}`,
+            `${t('settings.language')}          ${C.dim}${getLanguageName(settings.language)}${C.reset}`,
             `Binge delay       ${C.dim}${settings.bingeCountdownSeconds}s${C.reset}`,
-            `Default audio     ${C.dim}${settings.defaultAudio === "sub" ? "Subtitled" : "Dubbed"}${C.reset}`,
-            `Playback speed    ${C.dim}${settings.playbackSpeed}x${C.reset}`,
+            `${t('settings.defaultAudio')}     ${C.dim}${settings.defaultAudio === "sub" ? t('audio.subtitled') : t('audio.dubbed')}${C.reset}`,
+            `${t('settings.playbackSpeed')}    ${C.dim}${settings.playbackSpeed}x${C.reset}`,
             `Auto-play next    ${settings.autoPlayNext ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `Resume playback   ${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${t('settings.resumePlayback')}   ${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `Discord RPC       ${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `Download dir      ${C.dim}${settings.downloadDir.length > 30 ? '...' + settings.downloadDir.slice(-27) : settings.downloadDir}${C.reset}`,
-            `Download format   ${C.dim}${settings.downloadFormat.toUpperCase()}${C.reset}`,
+            `${t('settings.downloadDir')}      ${C.dim}${settings.downloadDir.length > 30 ? '...' + settings.downloadDir.slice(-27) : settings.downloadDir}${C.reset}`,
+            `${t('settings.downloadFormat')}   ${C.dim}${settings.downloadFormat.toUpperCase()}${C.reset}`,
             `API base URL      ${C.dim}${settings.apiBaseUrl}${C.reset}`,
             `Min similarity    ${C.dim}${settings.minSimilarityScore}%${C.reset}`,
-            `Notifications     ${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${t('settings.enableNotifications')}     ${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `Auto retry        ${settings.autoRetryFailed ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `Clear cache`,
             `Reset all settings`,
-            `Go back`
+            `${t('app.back')}`
         ];
-        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ Settings${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
+        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ ${t('settings.title')}${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
         if (idx < 0 || idx === options.length - 1) return;
         switch (idx) {
             case 0:
                 const availableLangs = getAvailableLanguages();
                 const langNames = availableLangs.map(lang => getLanguageName(lang));
-                const langIdx = await selectMenuOption(langNames, `\n  ${C.bold}${C.cyan}Language${C.reset}`, { allowBack: true });
+                const langIdx = await selectMenuOption(langNames, `\n  ${C.bold}${C.cyan}${t('settings.selectLanguage')}${C.reset}`, { allowBack: true });
                 if (langIdx >= 0) {
                     const selectedLang = availableLangs[langIdx];
                     settings.language = selectedLang;
                     loadLanguage(selectedLang);
                     saveSettings(settings);
-                    renderBox("Updated", [`Language: ${getLanguageName(selectedLang)}`], C.green);
-                    await wait(800);
+                    renderBox(t('app.success'), [`${t('settings.language')}: ${getLanguageName(selectedLang)}`], C.green);
+                    await wait(1200);
                 }
                 break;
             case 1:
@@ -2545,25 +2545,25 @@ async function triggerSettingsWorkflow(providersCount) {
                 if (valueIdx >= 0) { settings.bingeCountdownSeconds = values[valueIdx]; saveSettings(settings); }
                 break;
             case 2:
-                const audioOpts = ["Subtitled (sub)", "Dubbed (dub)"];
-                const audioIdx = await selectMenuOption(audioOpts, `\n  ${C.bold}${C.cyan}Default audio${C.reset}`, { allowBack: true });
+                const audioOpts = [`${t('audio.subtitled')} (sub)`, `${t('audio.dubbed')} (dub)`];
+                const audioIdx = await selectMenuOption(audioOpts, `\n  ${C.bold}${C.cyan}${t('settings.defaultAudio')}${C.reset}`, { allowBack: true });
                 if (audioIdx >= 0) { settings.defaultAudio = audioIdx === 0 ? "sub" : "dub"; saveSettings(settings); }
                 break;
             case 3:
                 const speeds = [0.75,1.0,1.25,1.5,1.75,2.0];
-                const speedIdx = await selectMenuOption(speeds.map(s => `${s}x`), `\n  ${C.bold}${C.cyan}Playback speed${C.reset}`, { allowBack: true });
+                const speedIdx = await selectMenuOption(speeds.map(s => `${s}x`), `\n  ${C.bold}${C.cyan}${t('settings.playbackSpeed')}${C.reset}`, { allowBack: true });
                 if (speedIdx >= 0) { settings.playbackSpeed = speeds[speedIdx]; saveSettings(settings); }
                 break;
             case 4:
                 settings.autoPlayNext = !settings.autoPlayNext;
                 saveSettings(settings);
-                renderBox("Updated", [`Auto-play next: ${settings.autoPlayNext ? "ON" : "OFF"}`], C.green);
+                renderBox(t('app.success'), [`Auto-play next: ${settings.autoPlayNext ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
             case 5:
                 settings.resumePlayback = !settings.resumePlayback;
                 saveSettings(settings);
-                renderBox("Updated", [`Resume playback: ${settings.resumePlayback ? "ON" : "OFF"}`], C.green);
+                renderBox(t('app.success'), [`${t('settings.resumePlayback')}: ${settings.resumePlayback ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
             case 6:
@@ -2571,7 +2571,7 @@ async function triggerSettingsWorkflow(providersCount) {
                 if (settings.discordEnabled && !discordRpc) initDiscordRpc(settings.discordClientId);
                 else if (!settings.discordEnabled && discordRpc) { discordRpc.destroy().catch(() => {}); discordRpc = null; discordReady = false; }
                 saveSettings(settings);
-                renderBox("Updated", [`Discord RPC: ${settings.discordEnabled ? "ON" : "OFF"}`], C.green);
+                renderBox(t('app.success'), [`Discord RPC: ${settings.discordEnabled ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
             case 7:
@@ -2579,8 +2579,8 @@ async function triggerSettingsWorkflow(providersCount) {
                 if (newDir.trim()) {
                     const resolved = path.resolve(newDir.trim());
                     if (!fs.existsSync(resolved)) try { fs.mkdirSync(resolved, { recursive: true }); } catch(e) {}
-                    if (fs.existsSync(resolved)) { settings.downloadDir = resolved; saveSettings(settings); renderBox("Saved", [`Download directory → ${settings.downloadDir}`], C.green); }
-                    else { renderBox("Error", ["Directory does not exist and could not be created."], C.red); }
+                    if (fs.existsSync(resolved)) { settings.downloadDir = resolved; saveSettings(settings); renderBox(t('boxes.saved'), [`Download directory → ${settings.downloadDir}`], C.green); }
+                    else { renderBox(t('app.error'), [t('boxes.directoryNotExist')], C.red); }
                     await wait(1200);
                 }
                 break;
@@ -2591,36 +2591,36 @@ async function triggerSettingsWorkflow(providersCount) {
                 break;
             case 9:
                 const newUrl = await askQuestion(`\n  ${C.yellow}API base URL${C.reset}  ${C.bold}›${C.reset} `);
-                if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox("Saved", [`API URL → ${settings.apiBaseUrl}`], C.green); await wait(1200); }
+                if (newUrl.trim()) { settings.apiBaseUrl = newUrl.trim(); saveSettings(settings); renderBox(t('boxes.saved'), [t('boxes.apiUrlUpdated') + ` ${settings.apiBaseUrl}`], C.green); await wait(1200); }
                 break;
             case 10:
                 const minScore = await askNumber(`\n  ${C.yellow}Minimum similarity score (1-100)${C.reset}  ${C.bold}›${C.reset} `, 1, 100);
                 settings.minSimilarityScore = minScore;
                 saveSettings(settings);
-                renderBox("Saved", [`Min similarity: ${settings.minSimilarityScore}%`], C.green);
+                renderBox(t('boxes.saved'), [t('boxes.minSimilarityUpdated') + `: ${settings.minSimilarityScore}%`], C.green);
                 await wait(1200);
                 break;
             case 11:
                 settings.enableNotifications = !settings.enableNotifications;
                 saveSettings(settings);
-                renderBox("Updated", [`Notifications: ${settings.enableNotifications ? "ON" : "OFF"}`], C.green);
+                renderBox(t('boxes.updated'), [t('boxes.notificationsUpdated') + `: ${settings.enableNotifications ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
             case 12:
                 settings.autoRetryFailed = !settings.autoRetryFailed;
                 saveSettings(settings);
-                renderBox("Updated", [`Auto retry: ${settings.autoRetryFailed ? "ON" : "OFF"}`], C.green);
+                renderBox(t('boxes.updated'), [t('boxes.autoRetryUpdated') + `: ${settings.autoRetryFailed ? "ON" : "OFF"}`], C.green);
                 await wait(800);
                 break;
             case 13:
                 clearAllCaches();
-                renderBox("Done", ["All caches cleared."], C.green);
+                renderBox(t('boxes.done'), [t('boxes.allCachesCleared')], C.green);
                 await wait(1000);
                 break;
             case 14:
                 saveSettings(defaultSettings);
                 clearAllCaches();
-                renderBox("Done", ["Settings reset to defaults."], C.green);
+                renderBox(t('boxes.done'), [t('boxes.settingsReset')], C.green);
                 await wait(1200);
                 break;
         }
@@ -2637,7 +2637,7 @@ async function triggerProviderOverviewWorkflow(providersList) {
         console.log(`  ${C.dim}${num}${C.reset}  ${C.bold}${C.green}${provider.name}${C.reset}`);
     });
     console.log();
-    renderBox("Info", [
+    renderBox(t('app.info'), [
         "All providers are searched in parallel.",
         `API: ${loadSettings().apiBaseUrl}`
     ], C.dim);
@@ -2679,7 +2679,7 @@ async function terminalEngine() {
         settings = loadSettings();
         const reachable = await checkApiServer(settings.apiBaseUrl);
         if (!reachable) {
-            renderBox("Fatal", ["Still cannot connect. Exiting."], C.red);
+            renderBox(t('boxes.fatal'), [t('boxes.stillCannotConnect')], C.red);
             rl.close();
             return;
         }
@@ -2708,15 +2708,15 @@ async function terminalEngine() {
         console.log(`  ${C.bold}${C.green}╰${"─".repeat(W)}╯${C.reset}\n`);
         
         const mainOptions = [
-            `${C.green}🔍${C.reset} ${C.bold}Search anime${C.reset}`,
-            `${C.cyan}📜${C.reset} ${C.bold}Recent searches${C.reset}  ${historyCount > 0 ? `${C.green}${historyCount}${C.reset}` : `${C.dim}none${C.reset}`}`,
-            `${C.magenta}📺${C.reset} ${C.bold}Watchlist${C.reset}        ${watchlistCount > 0 ? `${C.green}${watchlistCount}${C.reset}` : `${C.dim}empty${C.reset}`}`,
-            `${C.yellow}▶${C.reset} ${C.bold}Quick resume${C.reset}       ${watchlistCount > 0 ? `${C.green}ready${C.reset}` : `${C.dim}none${C.reset}`}`,
-            `${C.blue}🌐${C.reset} ${C.bold}Providers${C.reset}        ${C.cyan}${providersCount}${C.reset} ${C.dim}online${C.reset}`,
-            `${C.cyan}🐱${C.reset} ${C.bold}GitHub${C.reset}`,
-            `${C.green}⚙${C.reset} ${C.bold}Settings${C.reset}`,
-            `${C.yellow}❓${C.reset} ${C.bold}Help & About${C.reset}`,
-            `${C.dim}Exit${C.reset}`
+            `${C.green}🔍${C.reset} ${C.bold}${t('mainMenu.search')}${C.reset}`,
+            `${C.cyan}📜${C.reset} ${C.bold}${t('mainMenu.recentSearches')}${C.reset}  ${historyCount > 0 ? `${C.green}${historyCount}${C.reset}` : `${C.dim}none${C.reset}`}`,
+            `${C.magenta}📺${C.reset} ${C.bold}${t('mainMenu.watchlist')}${C.reset}        ${watchlistCount > 0 ? `${C.green}${watchlistCount}${C.reset}` : `${C.dim}empty${C.reset}`}`,
+            `${C.yellow}▶${C.reset} ${C.bold}${t('mainMenu.quickResume')}${C.reset}       ${watchlistCount > 0 ? `${C.green}ready${C.reset}` : `${C.dim}none${C.reset}`}`,
+            `${C.blue}🌐${C.reset} ${C.bold}${t('mainMenu.providers')}${C.reset}        ${C.cyan}${providersCount}${C.reset} ${C.dim}online${C.reset}`,
+            `${C.cyan}🐱${C.reset} ${C.bold}${t('mainMenu.github')}${C.reset}`,
+            `${C.green}⚙${C.reset} ${C.bold}${t('mainMenu.settings')}${C.reset}`,
+            `${C.yellow}❓${C.reset} ${C.bold}${t('mainMenu.helpAbout')}${C.reset}`,
+            `${C.dim}${t('mainMenu.exit')}${C.reset}`
         ];
         
         const choiceIdx = await selectMenuOption(mainOptions, ``, { statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
@@ -2726,12 +2726,12 @@ async function terminalEngine() {
             case 2: await triggerWatchlistWorkflow(providersList); break;
             case 3: await triggerQuickResume(providersList); break;
             case 4: await triggerProviderOverviewWorkflow(providersList); break;
-            case 5: openUrl(GITHUB_URL); renderBox("GitHub", ["Opening repository in your browser..."], C.green); await wait(1500); break;
+            case 5: openUrl(GITHUB_URL); renderBox(t('boxes.github'), [t('boxes.openingRepository')], C.green); await wait(1500); break;
             case 6: await triggerSettingsWorkflow(providersCount); break;
             case 7: await showHelp(); break;
-            case 8: 
+            case 8:
                 if (settings.confirmBeforeExit) {
-                    const confirm = await selectMenuOption(["Yes", "No"], `\n  ${C.yellow}Exit KittyCLI?${C.reset}`, { allowBack: true });
+                    const confirm = await selectMenuOption([t('actions.yes'), t('actions.no')], `\n  ${C.yellow}${t('menus.exitKittycli')}${C.reset}`, { allowBack: true });
                     if (confirm !== 0) break;
                 }
                 rl.close();
