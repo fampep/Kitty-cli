@@ -156,6 +156,14 @@ Custom API endpoint in `~/.kittycli/settings.json`:
 
 Default: `https://kittyapi.buzz`
 
+## Community & Support
+
+Join the KittyCLI community on Discord for support, updates, and discussions:
+
+- **Discord Server**: https://discord.gg/qBVQqSpqaB
+- **GitHub Repository**: https://github.com/fampep/Kitty-cli
+- **Report Issues**: https://github.com/fampep/Kitty-cli/issues
+
 ## License
 
 GPL-3.0
