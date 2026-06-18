@@ -81,7 +81,12 @@ const defaultSettings = {
     autoBackup: true,
     maxHistorySize: 50,
     confirmBeforeExit: false,
-    language: "en"
+    language: "en",
+    enabledProviders: [
+        "Miruro", "MKissa", "ReAnime", "KickAssAnime", "Animo", "AniZone", "Anikoto",
+        "AnimeGG", "Senshi", "Animetsu", "AnimeOnsen", "AllAnime", "Nyanime", "AniDao",
+        "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko"
+    ]
 };
 
 let discordRpc = null;
@@ -483,7 +488,8 @@ function loadSettings() {
         logLevel: typeof stored.logLevel === "string" ? stored.logLevel : defaultSettings.logLevel,
         autoBackup: typeof stored.autoBackup === "boolean" ? stored.autoBackup : defaultSettings.autoBackup,
         confirmBeforeExit: typeof stored.confirmBeforeExit === "boolean" ? stored.confirmBeforeExit : defaultSettings.confirmBeforeExit,
-        language: typeof stored.language === "string" && stored.language ? stored.language : defaultSettings.language
+        language: typeof stored.language === "string" && stored.language ? stored.language : defaultSettings.language,
+        enabledProviders: Array.isArray(stored.enabledProviders) && stored.enabledProviders.length > 0 ? stored.enabledProviders : defaultSettings.enabledProviders
     };
 }
 
@@ -1343,13 +1349,22 @@ async function fetchProviderList(apiBaseUrl) {
         return providers.filter(p => p.online).map(p => p.name);
     } catch (err) {
         debugLog("Failed to fetch provider list from API, using fallback list.");
-        return ["MKissa","Animo", "Miruro","Anikoto", "AnimeGG", "GogoAnime","AnimeHeaven", "AniDB", "AniDao", "AllAnime", "Animeverse","Anikage", "AniNeko", "ReAnime", "AniZone", "Nyanime", "Senshi", "Anitaku", "Animetsu", "AnimeParadise", "KaaLt"];
+        return [
+            "Miruro", "MKissa", "ReAnime", "KickAssAnime", "Animo", "AniZone", "Anikoto",
+            "AnimeGG", "Senshi", "Animetsu", "AnimeOnsen", "AllAnime", "Nyanime", "AniDao",
+            "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko"
+        ];
     }
 }
 
 async function createProviders(apiBaseUrl) {
     const providerNames = await fetchProviderList(apiBaseUrl);
     return providerNames.map(name => new ApiProvider(apiBaseUrl, name));
+}
+
+function filterEnabledProviders(providers, settings) {
+    if (!settings.enabledProviders || settings.enabledProviders.length === 0) return providers;
+    return providers.filter(p => settings.enabledProviders.includes(p.name));
 }
 
 async function selectServerTwoStep(providerServersMap, audioLabelText, statusBar) {
@@ -1533,6 +1548,13 @@ async function showMetadataPanel(title) {
 
 async function triggerSearchWorkflow(initialQuery, providersList) {
     if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
+    const settings = loadSettings();
+    providersList = filterEnabledProviders(providersList, settings);
+    if (providersList.length === 0) {
+        renderBox(t('app.warning'), ["No providers are enabled. Please enable at least one provider in Settings → Manage Providers."], C.yellow);
+        await pauseForKey();
+        return;
+    }
     clearScreen();
     renderHeader(t('search.title'), `${providersList.length} providers ready`);
     const query = initialQuery ?? await askQuestion(`\n  ${C.bold}${C.yellow}${t('search.prompt')}${C.reset} `);
@@ -1540,7 +1562,6 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
     if (!payload) return;
     saveSearchToHistory(payload);
 
-    const settings = loadSettings();
     let globalResults;
     const cacheKey = `search:${payload}:${settings.defaultAudio}`;
     cleanCache(searchCache, settings.cacheMaxSize, settings.cacheTTL);
@@ -1606,7 +1627,8 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
 
 async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
     const settings = loadSettings();
-    const providersList = await createProviders(settings.apiBaseUrl);
+    let providersList = await createProviders(settings.apiBaseUrl);
+    providersList = filterEnabledProviders(providersList, settings);
     const statusBar = { providersCount: providersList.length, apiUrl: settings.apiBaseUrl };
     const hasSub = selectedMatches.some(m => m.item.hasSub);
     const hasDub = selectedMatches.some(m => m.item.hasDub);
@@ -1956,7 +1978,8 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudio) {
     const settings = loadSettings();
     const coreTitle = selectedMatches[0]?.item.title || "Selected Anime";
-    const providersList = await createProviders(settings.apiBaseUrl);
+    let providersList = await createProviders(settings.apiBaseUrl);
+    providersList = filterEnabledProviders(providersList, settings);
     const statusBar = { providersCount: providersList.length, apiUrl: settings.apiBaseUrl };
     const hasSub = selectedMatches.some(m => m.item.hasSub);
     const hasDub = selectedMatches.some(m => m.item.hasDub);
@@ -2523,6 +2546,57 @@ async function triggerWatchlistWorkflow(providersList) {
     }
 }
 
+async function triggerProviderManagementWorkflow(allProviders) {
+    while (true) {
+        const settings = loadSettings();
+        const enabledProviders = settings.enabledProviders || [];
+        const totalProviders = allProviders.length;
+        const enabledCount = enabledProviders.length;
+        const disabledCount = totalProviders - enabledCount;
+
+        clearScreen();
+        renderHeader("PROVIDER MANAGEMENT", `${enabledCount}/${totalProviders} providers enabled`);
+        console.log();
+
+        const options = allProviders.map((provider, idx) => {
+            const isEnabled = enabledProviders.includes(provider.name);
+            const statusIcon = isEnabled ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`;
+            const num = String(idx + 1).padStart(2, "0");
+            return `${statusIcon}  ${num}  ${C.bold}${provider.name}${C.reset}`;
+        });
+
+        options.push(`${C.cyan}ℹ${C.reset}  Enable all providers`);
+        options.push(`${C.red}✗${C.reset}  Disable all providers`);
+        options.push(t('app.back'));
+
+        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.magenta}🔌${C.reset}  ${C.bold}Manage Providers${C.reset}  ${C.dim}(${enabledCount} enabled, ${disabledCount} disabled)${C.reset}`, { allowBack: true });
+
+        if (idx < 0 || idx === options.length - 1) return;
+
+        if (idx < allProviders.length) {
+            const selectedProvider = allProviders[idx];
+            const isCurrentlyEnabled = enabledProviders.includes(selectedProvider.name);
+
+            if (isCurrentlyEnabled) {
+                settings.enabledProviders = enabledProviders.filter(p => p !== selectedProvider.name);
+            } else {
+                settings.enabledProviders = [...enabledProviders, selectedProvider.name];
+            }
+            saveSettings(settings);
+        } else if (idx === allProviders.length) {
+            settings.enabledProviders = allProviders.map(p => p.name);
+            saveSettings(settings);
+            renderBox(t('app.success'), [`All ${allProviders.length} providers enabled`], C.green);
+            await wait(800);
+        } else if (idx === allProviders.length + 1) {
+            settings.enabledProviders = [];
+            saveSettings(settings);
+            renderBox(t('app.warning'), ["No providers enabled. Searches will not work until you enable at least one provider."], C.yellow);
+            await wait(1200);
+        }
+    }
+}
+
 async function triggerSettingsWorkflow(providersCount) {
     while (true) {
         const settings = loadSettings();
@@ -2540,6 +2614,7 @@ async function triggerSettingsWorkflow(providersCount) {
             `${C.magenta}⚡${C.reset} Min similarity${" ".repeat(17)}${C.dim}${settings.minSimilarityScore}%${C.reset}`,
             `${settings.enableNotifications ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  ${t('settings.enableNotifications')}${" ".repeat(3)}${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
             `${settings.autoRetryFailed ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  Auto retry${" ".repeat(22)}${settings.autoRetryFailed ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${C.magenta}🔌${C.reset} Manage Providers${" ".repeat(17)}${C.dim}Filter enabled sources${C.reset}`,
             `${C.cyan}🗑${C.reset}  Clear cache`,
             `${C.red}⚠${C.reset}  Reset all settings`,
             `${t('app.back')}`
@@ -2634,11 +2709,15 @@ async function triggerSettingsWorkflow(providersCount) {
                 await wait(800);
                 break;
             case 13:
+                const providersList = await createProviders(settings.apiBaseUrl);
+                await triggerProviderManagementWorkflow(providersList);
+                break;
+            case 14:
                 clearAllCaches();
                 renderBox(t('boxes.done'), [t('boxes.allCachesCleared')], C.green);
                 await wait(1000);
                 break;
-            case 14:
+            case 15:
                 saveSettings(defaultSettings);
                 clearAllCaches();
                 renderBox(t('boxes.done'), [t('boxes.settingsReset')], C.green);
@@ -2650,18 +2729,26 @@ async function triggerSettingsWorkflow(providersCount) {
 
 async function triggerProviderOverviewWorkflow(providersList) {
     if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
+    const settings = loadSettings();
+    const enabledProviders = settings.enabledProviders || [];
+    const enabledCount = enabledProviders.length > 0 ? enabledProviders.length : providersList.length;
+    const disabledCount = providersList.length - enabledCount;
+
     clearScreen();
-    renderHeader("PROVIDERS", `${providersList.length} sources available`);
+    renderHeader("PROVIDERS", `${enabledCount}/${providersList.length} enabled`);
     console.log();
     providersList.forEach((provider, idx) => {
         const num = String(idx + 1).padStart(2, "0");
-        const statusIcon = `${C.green}●${C.reset}`;
-        console.log(`  ${C.dim}${num}${C.reset}  ${statusIcon}  ${C.bold}${C.cyan}${provider.name}${C.reset}`);
+        const isEnabled = enabledProviders.length === 0 || enabledProviders.includes(provider.name);
+        const statusIcon = isEnabled ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`;
+        const nameColor = isEnabled ? `${C.bold}${C.cyan}` : `${C.dim}`;
+        console.log(`  ${C.dim}${num}${C.reset}  ${statusIcon}  ${nameColor}${provider.name}${C.reset}`);
     });
     console.log();
     renderBox(`${C.blue}🌐${C.reset} ${t('app.info')}`, [
-        `${C.green}✓${C.reset} ${C.dim}All providers are searched in parallel for fast results${C.reset}`,
-        `${C.yellow}🔗${C.reset} ${C.dim}API: ${loadSettings().apiBaseUrl}${C.reset}`
+        `${C.green}✓${C.reset} ${C.dim}${enabledCount}/${providersList.length} providers enabled for searching${C.reset}`,
+        `${C.yellow}🔗${C.reset} ${C.dim}API: ${loadSettings().apiBaseUrl}${C.reset}`,
+        `${C.magenta}🔌${C.reset} ${C.dim}Go to Settings → Manage Providers to configure${C.reset}`
     ], C.blue);
     await pauseForKey();
 }
@@ -2712,14 +2799,16 @@ async function terminalEngine() {
         await wait(500);
     }
 
-    const providersList = await createProviders(settings.apiBaseUrl);
-    const providersCount = providersList.length;
-    
+    let providersList = await createProviders(settings.apiBaseUrl);
+    const allProvidersCount = providersList.length;
+    const enabledProviders = settings.enabledProviders || [];
+    const providersCount = enabledProviders.length > 0 ? enabledProviders.length : allProvidersCount;
+
     while (true) {
         const watchlistCount = loadWatchlist().length;
         const historyCount = loadSearchHistory().length;
         clearScreen();
-        renderHeader("KITTYCLI", `v${APP_VERSION}  ·  ${providersCount} providers`);
+        renderHeader("KITTYCLI", `v${APP_VERSION}  ·  ${providersCount}/${allProvidersCount} providers`);
         const W = 72;
         const formatQuality = settings.downloadFormat.toUpperCase();
         console.log(`  ${C.bold}${C.green}┌${"─".repeat(W)}┐${C.reset}`);
@@ -2734,7 +2823,7 @@ async function terminalEngine() {
             `${C.cyan}📜${C.reset} ${C.bold}${t('mainMenu.recentSearches')}${C.reset}  ${historyCount > 0 ? `${C.green}${historyCount}${C.reset}` : `${C.dim}none${C.reset}`}${C.dim} saved${C.reset}`,
             `${C.magenta}📺${C.reset} ${C.bold}${t('mainMenu.watchlist')}${C.reset}        ${watchlistCount > 0 ? `${C.green}${watchlistCount}${C.reset}` : `${C.dim}empty${C.reset}`}${C.dim} items${C.reset}`,
             `${C.yellow}▶${C.reset} ${C.bold}${t('mainMenu.quickResume')}${C.reset}       ${watchlistCount > 0 ? `${C.green}ready${C.reset}` : `${C.dim}none${C.reset}`}`,
-            `${C.blue}🌐${C.reset} ${C.bold}${t('mainMenu.providers')}${C.reset}        ${C.cyan}${providersCount}${C.reset} ${C.dim}available${C.reset}`,
+            `${C.blue}🌐${C.reset} ${C.bold}${t('mainMenu.providers')}${C.reset}        ${C.cyan}${providersCount}/${allProvidersCount}${C.reset} ${C.dim}enabled${C.reset}`,
             `${C.cyan}🐱${C.reset} ${C.bold}${t('mainMenu.github')}${C.reset}${C.dim}         ─ View on GitHub${C.reset}`,
             `${C.green}⚙${C.reset} ${C.bold}${t('mainMenu.settings')}${C.reset}${C.dim}        ─ Customize experience${C.reset}`,
             `${C.yellow}❓${C.reset} ${C.bold}${t('mainMenu.helpAbout')}${C.reset}${C.dim}    ─ Show help and features${C.reset}`,

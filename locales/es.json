@@ -91,12 +91,17 @@
     "downloadFormat": "Formato de descarga",
     "downloadDir": "Carpeta de descargas",
     "resumePlayback": "Reanudar reproducción",
-    "discordEnabled": "Presencia en Discord",
+    "discordEnabled": "Discord RPC",
     "enableNotifications": "Notificaciones",
     "preferredQuality": "Calidad preferida",
     "mpvArgs": "Argumentos de MPV",
     "selectLanguage": "Selecciona idioma",
-    "currentLanguage": "Idioma actual"
+    "currentLanguage": "Idioma actual",
+    "bingeDelay": "Retraso de binge",
+    "autoPlayNext": "Reproducción automática siguiente",
+    "minSimilarity": "Similitud mínima",
+    "clearCache": "Limpiar caché",
+    "resetSettings": "Restablecer todos los ajustes"
   },
   "errors": {
     "mpvNotInstalled": "mpv no está instalado. No se puede reproducir video.",
@@ -191,7 +196,23 @@
     "back": "atrás",
     "startEpisode": "Episodio de inicio",
     "endEpisode": "Episodio final",
-    "noMetadata": "Metadatos no encontrados para"
+    "noMetadata": "Metadatos no encontrados para",
+    "enabled": "habilitado",
+    "disabled": "deshabilitado",
+    "total": "total",
+    "online": "en línea"
+  },
+  "providers": {
+    "title": "Administrar proveedores",
+    "description": "Filtrar fuentes habilitadas",
+    "enableAll": "Habilitar todos los proveedores",
+    "disableAll": "Deshabilitar todos los proveedores",
+    "selectProvider": "Selecciona proveedor para alternar",
+    "noProvidersEnabled": "No hay proveedores habilitados. Las búsquedas no funcionarán hasta que habilites al menos un proveedor.",
+    "allProvidersEnabled": "Todos los {{count}} proveedores habilitados",
+    "noProvidersAvailable": "No hay proveedores disponibles y no se pudieron deshabilitar",
+    "headerLabel": "ADMINISTRACIÓN DE PROVEEDORES",
+    "countLabel": "proveedores habilitados"
   },
   "mainMenu": {
     "title": "Menú principal",
@@ -204,5 +225,32 @@
     "settings": "Configuración",
     "helpAbout": "Ayuda y acerca de",
     "exit": "Salir"
+  },
+  "connectivity": {
+    "cannotReach": "No se puede alcanzar",
+    "checkServer": "Verifica que el servidor está ejecutándose y la URL es correcta.",
+    "changeUrl": "Puedes cambiar la URL de la API en configuración.",
+    "openingRepository": "Abriendo repositorio en tu navegador..."
+  },
+  "help": {
+    "title": "Ayuda y características",
+    "discord": "Discord",
+    "richPresence": "Soporte de Rich Presence",
+    "features": "Reproducción automática, reanudar, valores por defecto de calidad",
+    "bingeFeature": "Retraso de binge, velocidad de reproducción"
+  },
+  "watchlist": {
+    "empty": "Lista de pendientes vacía",
+    "nothingToResume": "Nada para reanudar",
+    "startWatching": "Comienza a ver para construir tu historial"
+  },
+  "searchHistory": {
+    "clear": "Borrar todo",
+    "noSearches": "Sin búsquedas guardadas aún"
+  },
+  "quickActions": {
+    "on": "ENCENDIDO",
+    "off": "APAGADO",
+    "auto": "Auto"
   }
 }

@@ -91,12 +91,17 @@
     "downloadFormat": "Download format",
     "downloadDir": "Download directory",
     "resumePlayback": "Resume playback",
-    "discordEnabled": "Discord presence",
+    "discordEnabled": "Discord RPC",
     "enableNotifications": "Notifications",
     "preferredQuality": "Preferred quality",
     "mpvArgs": "MPV arguments",
     "selectLanguage": "Select language",
-    "currentLanguage": "Current language"
+    "currentLanguage": "Current language",
+    "bingeDelay": "Binge delay",
+    "autoPlayNext": "Auto-play next",
+    "minSimilarity": "Min similarity",
+    "clearCache": "Clear cache",
+    "resetSettings": "Reset all settings"
   },
   "errors": {
     "mpvNotInstalled": "mpv not installed. cannot play video.",
@@ -191,7 +196,23 @@
     "back": "back",
     "startEpisode": "Start episode",
     "endEpisode": "End episode",
-    "noMetadata": "No metadata found for"
+    "noMetadata": "No metadata found for",
+    "enabled": "enabled",
+    "disabled": "disabled",
+    "total": "total",
+    "online": "online"
+  },
+  "providers": {
+    "title": "Manage Providers",
+    "description": "Filter enabled sources",
+    "enableAll": "Enable all providers",
+    "disableAll": "Disable all providers",
+    "selectProvider": "Select provider to toggle",
+    "noProvidersEnabled": "No providers enabled. Searches will not work until you enable at least one provider.",
+    "allProvidersEnabled": "All {{count}} providers enabled",
+    "noProvidersAvailable": "No providers available and could not be disabled",
+    "headerLabel": "PROVIDER MANAGEMENT",
+    "countLabel": "providers enabled"
   },
   "mainMenu": {
     "title": "Main Menu",
@@ -204,5 +225,32 @@
     "settings": "Settings",
     "helpAbout": "Help & About",
     "exit": "Exit"
+  },
+  "connectivity": {
+    "cannotReach": "Cannot reach",
+    "checkServer": "Check the server is running and the URL is correct.",
+    "changeUrl": "You can change the API URL in settings.",
+    "openingRepository": "Opening repository in your browser..."
+  },
+  "help": {
+    "title": "Help & Features",
+    "discord": "Discord",
+    "richPresence": "Rich Presence support",
+    "features": "Auto-play, resume, quality defaults",
+    "bingeFeature": "Binge delay, playback speed"
+  },
+  "watchlist": {
+    "empty": "Watchlist is empty",
+    "nothingToResume": "Nothing to resume",
+    "startWatching": "Start watching to build your history"
+  },
+  "searchHistory": {
+    "clear": "Clear all",
+    "noSearches": "No searches saved yet"
+  },
+  "quickActions": {
+    "on": "ON",
+    "off": "OFF",
+    "auto": "Auto"
   }
 }

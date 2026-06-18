@@ -91,12 +91,17 @@
     "downloadFormat": "Download-format",
     "downloadDir": "Download-mappe",
     "resumePlayback": "Genoptag afspilning",
-    "discordEnabled": "Discord-tilstedeværelse",
+    "discordEnabled": "Discord RPC",
     "enableNotifications": "Notifikationer",
     "preferredQuality": "Foretrukken kvalitet",
     "mpvArgs": "MPV-argumenter",
     "selectLanguage": "Vælg sprog",
-    "currentLanguage": "Nuværende sprog"
+    "currentLanguage": "Nuværende sprog",
+    "bingeDelay": "Binge-forsinkelse",
+    "autoPlayNext": "Auto-afspil næste",
+    "minSimilarity": "Min lighed",
+    "clearCache": "Ryd cache",
+    "resetSettings": "Nulstil alle indstillinger"
   },
   "errors": {
     "mpvNotInstalled": "mpv er ikke installeret. kan ikke afspille video.",
@@ -191,7 +196,23 @@
     "back": "tilbage",
     "startEpisode": "Start episode",
     "endEpisode": "Slutepisode",
-    "noMetadata": "Ingen metadata fundet for"
+    "noMetadata": "Ingen metadata fundet for",
+    "enabled": "aktiveret",
+    "disabled": "deaktiveret",
+    "total": "total",
+    "online": "online"
+  },
+  "providers": {
+    "title": "Administrer udbydere",
+    "description": "Filtrer aktiverede kilder",
+    "enableAll": "Aktivér alle udbydere",
+    "disableAll": "Deaktivér alle udbydere",
+    "selectProvider": "Vælg udbyder for at skifte",
+    "noProvidersEnabled": "Ingen udbydere aktiveret. Søgninger fungerer ikke, før du aktiverer mindst én udbyder.",
+    "allProvidersEnabled": "Alle {{count}} udbydere aktiveret",
+    "noProvidersAvailable": "Ingen udbydere tilgængelige og kunne ikke deaktiveres",
+    "headerLabel": "ADMINISTRATION AF UDBYDERE",
+    "countLabel": "udbydere aktiveret"
   },
   "mainMenu": {
     "title": "Hovedmenu",
@@ -204,5 +225,32 @@
     "settings": "Indstillinger",
     "helpAbout": "Hjælp og om",
     "exit": "Afslut"
+  },
+  "connectivity": {
+    "cannotReach": "Kan ikke nå",
+    "checkServer": "Kontroller at serveren kører og URL'en er korrekt.",
+    "changeUrl": "Du kan ændre API-URL'en i indstillinger.",
+    "openingRepository": "Åbner repository i din browser..."
+  },
+  "help": {
+    "title": "Hjælp og funktioner",
+    "discord": "Discord",
+    "richPresence": "Rich Presence-support",
+    "features": "Auto-afspil, genoptag, kvalitetsstandarder",
+    "bingeFeature": "Binge-forsinkelse, afspilningshastighed"
+  },
+  "watchlist": {
+    "empty": "Ønskeliste er tom",
+    "nothingToResume": "Intet at gennoptage",
+    "startWatching": "Start med at se for at opbygge din historik"
+  },
+  "searchHistory": {
+    "clear": "Ryd alle",
+    "noSearches": "Ingen søgninger gemt endnu"
+  },
+  "quickActions": {
+    "on": "TIL",
+    "off": "FRA",
+    "auto": "Auto"
   }
 }
