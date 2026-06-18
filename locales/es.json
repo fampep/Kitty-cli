@@ -1,0 +1,104 @@
+{
+  "app": {
+    "title": "KittyCLI",
+    "version": "v",
+    "loading": "Cargando...",
+    "error": "Error",
+    "warning": "Advertencia",
+    "info": "Información",
+    "success": "Éxito",
+    "back": "Atrás",
+    "cancel": "Cancelar",
+    "select": "Seleccionar",
+    "exit": "Salir"
+  },
+  "search": {
+    "title": "BUSCAR",
+    "prompt": "Buscar:",
+    "searching": "Buscando en {{count}} proveedores...",
+    "results": "Resultados para",
+    "noResults": "Nada encontrado para \"{{query}}\"",
+    "noCloseMatches": "Sin coincidencias cercanas para \"{{query}}\"",
+    "pickSource": "Elige proveedor",
+    "viewDetails": "Ver detalles del anime",
+    "goToEpisodes": "Ir a episodios"
+  },
+  "streaming": {
+    "launching": "iniciando mpv...",
+    "hlsDetected": "Stream HLS con video PNG - reproduciendo solo audio",
+    "fetchingStreams": "Obteniendo de {{count}} proveedor{{plural}}...",
+    "noStreamAvailable": "Sin stream disponible para el episodio {{episode}}",
+    "selectProvider": "Selecciona proveedor y servidor",
+    "selectQuality": "Selecciona calidad",
+    "selectSubtitles": "Subtítulos disponibles",
+    "downloadSubtitles": "Descargar subtítulos",
+    "skip": "Saltar",
+    "resuming": "reanudando desde",
+    "nowPlaying": "Reproduciendo ahora",
+    "streamDetails": "Detalles del stream",
+    "provider": "Proveedor",
+    "server": "Servidor",
+    "url": "URL",
+    "format": "Formato",
+    "availableServers": "Servidores disponibles",
+    "subtitles": "Subtítulos"
+  },
+  "episodes": {
+    "title": "Episodios",
+    "select": "Selecciona episodio",
+    "episode": "EP",
+    "of": "de",
+    "watched": "Visto",
+    "watchlist": "Pendientes"
+  },
+  "audio": {
+    "selectAudio": "Selecciona tipo de audio",
+    "sub": "SUBTÍTULOS",
+    "dub": "DUB",
+    "audioNotAvailable": "{{audio}} no disponible para este episodio",
+    "fallbackTo": "Usando {{audio}}"
+  },
+  "download": {
+    "title": "Descargar",
+    "downloadEpisode": "Descargar episodio",
+    "singleDownload": "Descargar un episodio",
+    "batchDownload": "Descargar lotes",
+    "selectQuality": "Selecciona calidad",
+    "downloading": "Descargando...",
+    "downloadComplete": "¡Descarga completada!",
+    "downloadFailed": "La descarga falló",
+    "selectFolder": "Selecciona carpeta de descarga"
+  },
+  "binge": {
+    "title": "Modo Binge",
+    "playNext": "Reproducir siguiente",
+    "stop": "Detener",
+    "toggleAudio": "Alternar SUBTÍTULOS/DUB",
+    "countdownSeconds": "segundos hasta el siguiente episodio"
+  },
+  "settings": {
+    "title": "Configuración",
+    "defaultAudio": "Audio predeterminado",
+    "playbackSpeed": "Velocidad de reproducción",
+    "downloadFormat": "Formato de descarga",
+    "downloadDir": "Carpeta de descargas",
+    "resumePlayback": "Reanudar reproducción",
+    "discordEnabled": "Presencia en Discord",
+    "enableNotifications": "Notificaciones",
+    "preferredQuality": "Calidad preferida",
+    "mpvArgs": "Argumentos de MPV"
+  },
+  "errors": {
+    "mpvNotInstalled": "mpv no está instalado. No se puede reproducir video.",
+    "streamNotFound": "Stream no encontrado",
+    "apiError": "Error de API",
+    "timeout": "Tiempo de espera agotado",
+    "networkError": "Error de red"
+  },
+  "messages": {
+    "savedToWatchlist": "Guardado en pendientes",
+    "removedFromWatchlist": "Eliminado de pendientes",
+    "settingsSaved": "Configuración guardada",
+    "cacheCleared": "Caché borrado"
+  }
+}

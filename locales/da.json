@@ -1,0 +1,104 @@
+{
+  "app": {
+    "title": "KittyCLI",
+    "version": "v",
+    "loading": "Indlæser...",
+    "error": "Fejl",
+    "warning": "Advarsel",
+    "info": "Info",
+    "success": "Succes",
+    "back": "Tilbage",
+    "cancel": "Annuller",
+    "select": "Vælg",
+    "exit": "Afslut"
+  },
+  "search": {
+    "title": "SØG",
+    "prompt": "Søg:",
+    "searching": "Søger blandt {{count}} udbydere...",
+    "results": "Resultater for",
+    "noResults": "Intet fundet for \"{{query}}\"",
+    "noCloseMatches": "Ingen tætte match for \"{{query}}\"",
+    "pickSource": "Vælg kilde",
+    "viewDetails": "Se anime-detaljer",
+    "goToEpisodes": "Gå til episoder"
+  },
+  "streaming": {
+    "launching": "starter mpv...",
+    "hlsDetected": "HLS-stream med PNG-video - afspiller kun lyd",
+    "fetchingStreams": "Henter fra {{count}} udbyder{{plural}}...",
+    "noStreamAvailable": "Ingen stream tilgængelig for episode {{episode}}",
+    "selectProvider": "Vælg udbyder og server",
+    "selectQuality": "Vælg kvalitet",
+    "selectSubtitles": "Undertekster tilgængelige",
+    "downloadSubtitles": "Download undertekster",
+    "skip": "Spring over",
+    "resuming": "genoptager fra",
+    "nowPlaying": "Nu afspilles",
+    "streamDetails": "Stream-detaljer",
+    "provider": "Udbyder",
+    "server": "Server",
+    "url": "URL",
+    "format": "Format",
+    "availableServers": "Tilgængelige servere",
+    "subtitles": "Undertekster"
+  },
+  "episodes": {
+    "title": "Episoder",
+    "select": "Vælg episode",
+    "episode": "EP",
+    "of": "af",
+    "watched": "Set",
+    "watchlist": "Ønskeliste"
+  },
+  "audio": {
+    "selectAudio": "Vælg lydtype",
+    "sub": "UNDERTEKST",
+    "dub": "DUB",
+    "audioNotAvailable": "{{audio}} ikke tilgængelig for denne episode",
+    "fallbackTo": "Falder tilbage til {{audio}}"
+  },
+  "download": {
+    "title": "Download",
+    "downloadEpisode": "Download episode",
+    "singleDownload": "Download enkelt episode",
+    "batchDownload": "Batch download",
+    "selectQuality": "Vælg kvalitet",
+    "downloading": "Downloader...",
+    "downloadComplete": "Download fuldført!",
+    "downloadFailed": "Download mislykkedes",
+    "selectFolder": "Vælg download-mappe"
+  },
+  "binge": {
+    "title": "Binge-tilstand",
+    "playNext": "Afspil næste episode",
+    "stop": "Stop",
+    "toggleAudio": "Skift UNDERTEKST/DUB",
+    "countdownSeconds": "sekunder til næste episode"
+  },
+  "settings": {
+    "title": "Indstillinger",
+    "defaultAudio": "Standardlyd",
+    "playbackSpeed": "Afspilningshastighed",
+    "downloadFormat": "Download-format",
+    "downloadDir": "Download-mappe",
+    "resumePlayback": "Genoptag afspilning",
+    "discordEnabled": "Discord-tilstedeværelse",
+    "enableNotifications": "Notifikationer",
+    "preferredQuality": "Foretrukken kvalitet",
+    "mpvArgs": "MPV-argumenter"
+  },
+  "errors": {
+    "mpvNotInstalled": "mpv er ikke installeret. kan ikke afspille video.",
+    "streamNotFound": "Stream ikke fundet",
+    "apiError": "API-fejl",
+    "timeout": "Anmodning løb ud af tid",
+    "networkError": "Netværksfejl"
+  },
+  "messages": {
+    "savedToWatchlist": "Gemt på ønskeliste",
+    "removedFromWatchlist": "Fjernet fra ønskeliste",
+    "settingsSaved": "Indstillinger gemt",
+    "cacheCleared": "Cache ryddet"
+  }
+}
