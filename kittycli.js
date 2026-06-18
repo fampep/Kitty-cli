@@ -527,17 +527,18 @@ function padRightVisible(value, width) {
     return value + " ".repeat(padding); 
 }
 
-// FIXED: Safe box rendering with bounds checking
+// Enhanced box rendering with better visual formatting
 function renderBox(title, content, color = C.green) {
     const maxLen = Math.max(title.length, ...content.map(l => visibleLength(l))) + 4;
     const safeLen = Math.max(1, maxLen); // Ensure at least 1
-    
-    const top = `${color}╭${"─".repeat(Math.max(0, safeLen))}╮${C.reset}`;
+
+    const top = `${color}┌${"─".repeat(Math.max(0, safeLen))}┐${C.reset}`;
     const titlePadding = Math.max(0, safeLen - title.length - 1);
     const titleLine = `${color}│${C.reset} ${C.bold}${color}${title}${C.reset}${" ".repeat(titlePadding)}${color}│${C.reset}`;
     const mid = `${color}├${"─".repeat(Math.max(0, safeLen))}┤${C.reset}`;
-    const bottom = `${color}╰${"─".repeat(Math.max(0, safeLen))}╯${C.reset}`;
-    
+    const bottom = `${color}└${"─".repeat(Math.max(0, safeLen))}┘${C.reset}`;
+
+    console.log();
     console.log(top);
     console.log(titleLine);
     console.log(mid);
@@ -546,6 +547,7 @@ function renderBox(title, content, color = C.green) {
         console.log(`${color}│${C.reset} ${line}${" ".repeat(padding)}${color}│${C.reset}`);
     }
     console.log(bottom);
+    console.log();
 }
 
 function renderHeader(title, subtitle) {
@@ -588,9 +590,9 @@ function renderStatusBar(providersCount, apiUrl, additional) {
         `${C.dim}api:${C.reset} ${C.yellow}${apiUrl.length > 30 ? apiUrl.substring(0, 27) + '...' : apiUrl}${C.reset}`,
         additional || `${C.dim}↑↓ move  ↵ select  1-9 jump  q back  ? help${C.reset}`
     ];
-    console.log(`\n${C.dim}${"─".repeat(safeW)}${C.reset}`);
+    console.log(`\n${C.bold}${C.dim}${"─".repeat(safeW)}${C.reset}`);
     console.log(parts.join(`  ${C.dim}│${C.reset}  `));
-    console.log(`${C.dim}${"─".repeat(safeW)}${C.reset}`);
+    console.log(`${C.bold}${C.dim}${"─".repeat(safeW)}${C.reset}\n`);
 }
 
 function normalizeTitle(title) { return title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim(); }
@@ -1044,17 +1046,17 @@ async function selectMenuOption(options, title, config = {}) {
             console.log();
             visibleOptions.forEach((opt, offset) => {
                 const idx = start + offset;
-                const numberHint = offset < 9 ? `${C.dim}${offset + 1}${C.reset}` : " ";
+                const numberHint = offset < 9 ? `${C.cyan}[${offset + 1}]${C.reset}` : "    ";
                 if (idx === currentPos) {
                     const raw = stripAnsi(opt);
-                    const padded = raw.length < safeW - 8 ? opt + " ".repeat(safeW - 8 - raw.length) : opt;
-                    console.log(`  ${C.bgGreen}${C.green}${C.bold} > ${numberHint}${C.green}  ${padded} ${C.reset}`);
+                    const padded = raw.length < safeW - 10 ? opt + " ".repeat(safeW - 10 - raw.length) : opt;
+                    console.log(`  ${C.bgGreen}${C.white}${C.bold} ▶ ${numberHint} ${padded} ${C.reset}`);
                 } else {
-                    console.log(`  ${C.white}${C.dim}  ${numberHint}${C.reset}  ${opt}${C.reset}`);
+                    console.log(`  ${C.dim}  ${numberHint}${C.reset}  ${opt}${C.reset}`);
                 }
             });
             console.log();
-            const footerParts = ["↑↓ move", "↵ select", "1-9 jump"];
+            const footerParts = ["↑↓ navigate", "↵ select", "1-9 quick pick"];
             if (pageCount > 1) footerParts.push(`page ${page+1}/${pageCount}`);
             if (config.allowBack) footerParts.push("q back");
             console.log(`  ${C.dim}${footerParts.join("  ·  ")}${C.reset}`);
@@ -1102,50 +1104,51 @@ async function showHelp() {
     clearScreen();
     renderHeader("KITTYCLI HELP", `v${APP_VERSION}`);
     const content = [
-        `${C.bold}${C.cyan}Navigation${C.reset}`,
-        `  ${C.green}↑ ↓${C.reset}        move through menu`,
-        `  ${C.green}↵${C.reset}          select item`,
+        `${C.bold}${C.cyan}━━━ Navigation ${C.reset}`,
+        `  ${C.green}↑ ↓${C.reset}        move through menu options`,
+        `  ${C.green}↵${C.reset}          select highlighted item`,
         `  ${C.green}1 – 9${C.reset}      quick-pick visible row`,
         `  ${C.green}home / end${C.reset} jump to top / bottom`,
         `  ${C.green}pgup / pgdn${C.reset} change page`,
         `  ${C.green}?${C.reset}          this help screen`,
+        `  ${C.green}q${C.reset}          back to previous menu`,
         ``,
-        `${C.bold}${C.cyan}Binge mode${C.reset}`,
+        `${C.bold}${C.cyan}━━━ Binge Mode ${C.reset}`,
         `  ${C.green}Y${C.reset}          continue to next episode now`,
         `  ${C.green}N${C.reset}          stop binge`,
         `  ${C.green}A${C.reset}          toggle audio (sub/dub)`,
         ``,
-        `${C.bold}${C.cyan}Premium Features${C.reset}`,
-        `  ${C.green}🎬 Multi-provider${C.reset} search & streaming across 15+ sources`,
-        `  ${C.green}📝 Smart Watchlist${C.reset} with progress, seasons & episode tracking`,
-        `  ${C.green}⬇️  Download System${C.reset} (${C.bold}MKV${C.reset}/${C.dim}MP4${C.reset}) with quality selection`,
-        `  ${C.green}🔄 Resumable${C.reset} downloads & playback position sync`,
-        `  ${C.green}⚡ Batch${C.reset} download with parallel processing`,
-        `  ${C.green}🎨 AniList${C.reset} metadata with real episode titles & seasons`,
-        `  ${C.green}💬 Discord${C.reset} Rich Presence & system notifications`,
-        `  ${C.green}🎛️  Playback${C.reset} quality selection on stream`,
+        `${C.bold}${C.cyan}━━━ Premium Features ${C.reset}`,
+        `  ${C.green}🎬 Multi-provider${C.reset}  search across 15+ sources in parallel`,
+        `  ${C.green}📝 Smart Watchlist${C.reset}  with progress, seasons & tracking`,
+        `  ${C.green}⬇️  Download System${C.reset}   ${C.bold}MKV${C.reset}${C.dim}/${C.reset}${C.bold}MP4${C.reset} with quality selection`,
+        `  ${C.green}🔄 Resumable${C.reset}      downloads & playback position sync`,
+        `  ${C.green}⚡ Batch${C.reset}         download multiple episodes`,
+        `  ${C.green}🎨 AniList${C.reset}       real episode titles & seasons`,
+        `  ${C.green}💬 Discord${C.reset}       Rich Presence support`,
+        `  ${C.green}🎛️  Playback${C.reset}      quality selection on stream`,
         ``,
-        `${C.bold}${C.cyan}Settings Available${C.reset}`,
-        `  • Download format (MKV/MP4) & quality preferences`,
-        `  • Auto-play, resume, quality defaults`,
-        `  • Binge delay, playback speed`,
-        `  • Provider similarity matching & retry policies`,
+        `${C.bold}${C.cyan}━━━ Settings Available ${C.reset}`,
+        `  ◈ Download format & quality preferences`,
+        `  ◈ Auto-play, resume, quality defaults`,
+        `  ◈ Binge delay, playback speed`,
+        `  ◈ Provider matching & retry policies`,
         ``,
-        `${C.bold}${C.cyan}Learn More${C.reset}`,
-        `  ${C.underline}${GITHUB_URL}${C.reset}`,
+        `${C.bold}${C.cyan}━━━ Learn More ${C.reset}`,
+        `  ${C.underline}${C.yellow}${GITHUB_URL}${C.reset}`,
         ``,
-        `${C.dim}Press any key to return${C.reset}`
+        `${C.dim}${C.bold}✦${C.reset}${C.dim} Press any key to return${C.reset}`
     ];
-    renderBox(t('boxes.help'), content, C.cyan);
+    renderBox(`${C.cyan}?${C.reset} ${t('boxes.help')}`, content, C.cyan);
     await pauseForKey();
 }
 
 async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio, nextEpisodeTitle, onAudioToggle, autoPlayNext) {
     if (autoPlayNext) return { continue: true };
     if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
-        const titleText = nextEpisodeTitle ? ` • ${nextEpisodeTitle.substring(0, 50)}` : '';
-        console.log(`  ${C.yellow}Next: Episode ${nextEpisodeNum}${titleText}${C.reset}`);
-        console.log(`  ${C.yellow}Starting in ${seconds}s...${C.reset}`);
+        const titleText = nextEpisodeTitle ? ` • ${C.dim}${nextEpisodeTitle.substring(0, 50)}${C.reset}` : '';
+        console.log(`\n  ${C.yellow}${C.bold}▶${C.reset} Next: Episode ${C.bold}${nextEpisodeNum}${C.reset}${titleText}`);
+        console.log(`  ${C.yellow}${C.bold}⏱${C.reset} Starting in ${C.bold}${seconds}s${C.reset}...`);
         await wait(seconds * 1000);
         return { continue: true };
     }
@@ -1156,11 +1159,12 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
         let audio = currentAudio;
         const render = () => {
             const filled = Math.min(20, Math.max(0, Math.round((remaining / seconds) * 20)));
-            const bar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 20 - filled))}${C.reset}`;
-            const audioTag = audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
+            const bar = `${C.green}${'▮'.repeat(filled)}${C.reset}${C.dim}${'─'.repeat(Math.max(0, 20 - filled))}${C.reset}`;
+            const audioTag = audio === "sub" ? `${C.cyan}◈ SUB${C.reset}` : `${C.magenta}◈ DUB${C.reset}`;
             const epStr = String(nextEpisodeNum).padStart(2, '0');
             const titleDisplay = nextEpisodeTitle ? ` ${C.dim}•${C.reset} ${C.yellow}${nextEpisodeTitle.substring(0, 35)}${C.reset}` : "";
-            process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶ E${epStr}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${remaining}s${C.reset}  ${C.dim}Y now  N stop  A audio${C.reset} [${audioTag}]  `);
+            const timeColor = remaining <= 3 ? C.red : remaining <= 5 ? C.yellow : C.green;
+            process.stdout.write(`\x1b[2K\r  ${C.bold}${C.green}▶${C.reset} E${C.cyan}${epStr}${C.reset}${titleDisplay}  [${bar}] ${C.bold}${timeColor}${remaining}s${C.reset}  ${C.dim}│${C.reset} ${C.green}${C.bold}Y${C.reset}${C.dim} now  ${C.reset}${C.green}${C.bold}N${C.reset}${C.dim} stop  ${C.reset}${C.green}${C.bold}A${C.reset}${C.dim} audio${C.reset} [${audioTag}]`);
         };
         const timer = setInterval(() => {
             if (resolved) return;
@@ -1181,7 +1185,7 @@ async function bingeCountdownWithProgress(seconds, nextEpisodeNum, currentAudio,
             if (key === 'y' || key === '\r') {
                 if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(); resolve({ continue: true, newAudio: audio !== currentAudio ? audio : undefined }); }
             } else if (key === 'n') {
-                if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(`\n  ${C.dim}Binge stopped.${C.reset}`); resolve({ continue: false }); }
+                if (!resolved) { resolved = true; clearInterval(timer); process.stdin.setRawMode(isRaw); process.stdin.removeListener('data', onData); console.log(`\n  ${C.yellow}⏹${C.reset} Binge stopped.`); resolve({ continue: false }); }
             } else if (key === 'a') {
                 audio = audio === "sub" ? "dub" : "sub";
                 if (onAudioToggle) onAudioToggle();
@@ -1199,7 +1203,7 @@ async function checkApiServer(baseUrl) {
         return true;
     } catch (err) {
         debugLog(`API health check failed: ${err.message}`);
-        renderBox(t('boxes.connectionError'), [`Cannot reach ${baseUrl}`, "Check the server is running and the URL is correct.", "", `${C.dim}You can change the API URL in settings.${C.reset}`], C.red);
+        renderBox(`${C.red}✗${C.reset} ${t('boxes.connectionError')}`, [`${C.red}Cannot reach${C.reset} ${C.bold}${baseUrl}${C.reset}`, `${C.dim}Check the server is running and the URL is correct.${C.reset}`, ``, `${C.dim}You can change the API URL in ${C.bold}settings${C.reset}${C.dim}.${C.reset}`], C.red);
         return false;
     }
 }
@@ -1365,12 +1369,13 @@ async function selectEpisodeSimple(maxEpNum, totalEpisodes, _, statusBar) {
     const episodeOptions = [];
     for (let i = 1; i <= maxEpNum; i++) {
         const denominator = totalEpisodes ? `${C.dim}/${totalEpisodes}${C.reset}` : `${C.dim}/?${C.reset}`;
-        const episodeNum = `${C.bold}${C.cyan}${t('episodes.episode')} ${String(i).padStart(2, '0')}${C.reset}`;
-        const label = `${episodeNum}${denominator}`;
+        const episodeNum = `${C.cyan}E${String(i).padStart(2, '0')}${C.reset}`;
+        const icon = i === 1 ? `${C.green}●${C.reset}` : ` `;
+        const label = `${icon} ${episodeNum}${denominator}${C.dim}  ─ ${t('episodes.episode')} ${i}${C.reset}`;
         episodeOptions.push(label);
     }
 
-    const headerText = `\n  ${C.bold}${C.cyan}◈ ${t('episodes.select')}${C.reset}  ${C.dim}${maxEpNum} ${t('labels.episodes')}${C.reset}`;
+    const headerText = `\n  ${C.bold}${C.cyan}▶ ${t('episodes.select')}${C.reset}  ${C.bold}${maxEpNum}${C.reset}${C.dim} episodes available${C.reset}`;
     const pickedEpIdx = await selectMenuOption(episodeOptions, headerText, { allowBack: true, statusBar });
     return pickedEpIdx >= 0 ? pickedEpIdx + 1 : -1;
 }
@@ -1381,21 +1386,22 @@ async function batchDownloadQueueStreamDirect(jobs, coreTitle, statusBar, select
     const settings = loadSettings();
     const ext = settings.downloadFormat;
 
-    renderBox(t('download.batchDownload'), [
-        `${C.bold}${jobs.length}${C.reset} ${t('labels.episodes')} ${t('messages.queuedForDownload')}`,
-        `${C.dim}Format: ${ext.toUpperCase()}${C.reset}`,
-        `${C.dim}Quality: ${selectedQuality || 'auto'}${C.reset}`,
+    renderBox(`${C.magenta}⬇⬇${C.reset} ${t('download.batchDownload')}`, [
+        `${C.bold}${C.green}${jobs.length}${C.reset} ${t('labels.episodes')} ${C.dim}queued for download${C.reset}`,
+        `${C.blue}📦${C.reset} ${C.dim}Format:${C.reset} ${C.bold}${ext.toUpperCase()}${C.reset}`,
+        `${C.yellow}⚙${C.reset} ${C.dim}Quality:${C.reset} ${C.bold}${selectedQuality || 'auto'}${C.reset}`,
     ], C.cyan);
 
     let successCount = 0, failCount = 0;
     for (const job of jobs) {
         const filename = `${coreTitle} - Episode ${job.episode} (${audio.toUpperCase()}).${ext}`;
         try {
-            console.log(`\n  ${C.bold}[${successCount + failCount + 1}/${jobs.length}]${C.reset} ${t('download.downloading')}${filename}...`);
+            const progress = `[${C.cyan}${successCount + failCount + 1}${C.reset}/${C.cyan}${jobs.length}${C.reset}]`;
+            console.log(`\n  ${C.bold}${progress}${C.reset} ${C.green}⬇${C.reset} ${t('download.downloading')} ${C.bold}${filename}${C.reset}...`);
             const stream = await withSpinner(`Fetching stream...`, async () => await job.provider.extractStreamDirectByAnilistId(job.anilistId, job.episode, audio));
 
             if (!stream || !stream.file) {
-                console.log(`  ${C.red}✗ Failed to fetch stream${C.reset}`);
+                console.log(`  ${C.red}✗${C.reset} Failed to fetch stream`);
                 failCount++;
                 continue;
             }
@@ -1405,17 +1411,20 @@ async function batchDownloadQueueStreamDirect(jobs, coreTitle, statusBar, select
             }
 
             await resumeableDownload(stream, filename, null, ext);
+            console.log(`  ${C.green}✓${C.reset} Episode ${C.bold}${job.episode}${C.reset} downloaded successfully`);
             successCount++;
         } catch (err) {
-            console.log(`  ${C.red}✗ ${t('download.downloadFailed')}: ${err.message.substring(0, 50)}${C.reset}`);
+            console.log(`  ${C.red}✗${C.reset} ${t('download.downloadFailed')}: ${err.message.substring(0, 50)}`);
             failCount++;
         }
     }
 
-    renderBox(t('download.title'), [
-        `${C.green}✓ Success: ${successCount}${C.reset}  ${C.red}✗ Failed: ${failCount}${C.reset}`,
-        `${C.dim}Total: ${successCount + failCount}/${jobs.length}${C.reset}`
-    ], successCount === jobs.length ? C.green : C.yellow);
+    const successRate = Math.round((successCount / jobs.length) * 100);
+    const summaryColor = successCount === jobs.length ? C.green : successRate >= 75 ? C.yellow : C.red;
+    renderBox(`${C.magenta}⬇${C.reset} ${t('download.title')}`, [
+        `${C.green}✓${C.reset} ${C.bold}${successCount}${C.reset}${C.dim} successful${C.reset}  ${C.red}✗${C.reset} ${C.bold}${failCount}${C.reset}${C.dim} failed${C.reset}`,
+        `${C.dim}Progress:${C.reset} ${C.bold}${successCount}${C.reset}${C.dim}/${C.bold}${jobs.length}${C.reset}${C.dim} (${successRate}%)${C.reset}`
+    ], summaryColor);
     await wait(2000);
 }
 
@@ -1426,14 +1435,15 @@ async function selectEpisodeWithMarkers(maxEpNum, totalEpisodes, title, statusBa
     const effectiveTotal = totalEpisodes || watchInfo?.totalEpisodes || null;
     const episodeOptions = [];
     for (let i = 1; i <= maxEpNum; i++) {
-        let denominator = effectiveTotal ? `${C.dim}/${effectiveTotal}${C.reset}` : `${C.dim}/?${C.reset}`;
-        let episodeNum = `${C.bold}${C.cyan}EP ${String(i).padStart(2, '0')}${C.reset}`;
+        let denominator = effectiveTotal ? `${C.dim}/${C.bold}${effectiveTotal}${C.reset}` : `${C.dim}/?${C.reset}`;
+        let episodeIcon = i <= lastWatched ? `${C.green}✓${C.reset}` : i === lastWatched + 1 ? `${C.yellow}●${C.reset}` : ` `;
+        let episodeNum = `${episodeIcon} ${C.cyan}E${String(i).padStart(2, '0')}${C.reset}`;
         let label = `${episodeNum}${denominator}`;
 
         if (effectiveTotal && effectiveTotal > 0) {
             const percent = Math.min(100, Math.max(0, Math.round((i / effectiveTotal) * 100)));
             const filled = Math.min(8, Math.max(0, Math.round(percent / 12.5)));
-            const minibar = `${C.green}${'█'.repeat(filled)}${C.reset}${C.dim}${'░'.repeat(Math.max(0, 8 - filled))}${C.reset}`;
+            const minibar = `${C.green}${'▮'.repeat(filled)}${C.reset}${C.dim}${'─'.repeat(Math.max(0, 8 - filled))}${C.reset}`;
             label += `  [${minibar}] ${C.dim}${percent.toString().padStart(3)}%${C.reset}`;
         }
 
@@ -1572,10 +1582,14 @@ async function triggerSearchWorkflow(initialQuery, providersList) {
         const item = matches[0].item;
         const uniqueEngines = Array.from(new Set(matches.map(i => i.provider.name)));
         const audioFlags = audioLabel(matches.some(i => i.item.hasSub), matches.some(i => i.item.hasDub));
-        const sourceLabel = uniqueEngines.length === 1 ? uniqueEngines[0] : `${uniqueEngines.length} sources`;
+        const sourceLabel = uniqueEngines.length === 1 ? `${C.cyan}${uniqueEngines[0]}${C.reset}` : `${C.cyan}${uniqueEngines.length}${C.reset}${C.dim} sources${C.reset}`;
         const score = Math.max(...matches.map(m => m.score));
-        const scoreBar = score >= 90 ? `${C.green}${score}%${C.reset}` : score >= 70 ? `${C.yellow}${score}%${C.reset}` : `${C.dim}${score}%${C.reset}`;
-        return `${padRightVisible(item.title, 44)} ${C.cyan}${audioFlags}${C.reset}  ${C.dim}${sourceLabel}${C.reset}  ${scoreBar}`;
+        let scoreBar = '';
+        if (score >= 95) scoreBar = `${C.green}${C.bold}⭐${C.reset} ${score}%`;
+        else if (score >= 90) scoreBar = `${C.green}${score}%${C.reset}`;
+        else if (score >= 70) scoreBar = `${C.yellow}${score}%${C.reset}`;
+        else scoreBar = `${C.dim}${score}%${C.reset}`;
+        return `${padRightVisible(item.title, 40)} ${C.cyan}◈${C.reset} ${audioFlags}${" ".repeat(3)}${sourceLabel}${" ".repeat(2)}${scoreBar}`;
     });
 
     const idx = await selectMenuOption(showSelectionStrings, `\n  ${C.bold}${C.cyan}◈ ${t('search.results')}${C.reset} ${C.bold}"${payload}"${C.reset}`, { allowBack: true, statusBar: { providersCount: providersList.length, apiUrl: loadSettings().apiBaseUrl } });
@@ -1599,7 +1613,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
     let audio = settings.defaultAudio;
 
     if (hasSub && hasDub) {
-        const audioIdx = await selectMenuOption([`${C.cyan}${t('audio.sub')}${C.reset}  ${t('audio.subtitled')}`, `${C.magenta}${t('audio.dub')}${C.reset}  ${t('audio.dubbed')}`], `\n  ${C.bold}${C.cyan}◈ ${t('audio.selectAudio')}${C.reset}`, { allowBack: true, statusBar });
+        const audioIdx = await selectMenuOption([`${C.cyan}◈ ${t('audio.sub')}${C.reset}  ${C.bold}${t('audio.subtitled')}${C.reset}${C.dim} - English subtitles${C.reset}`, `${C.magenta}◈ ${t('audio.dub')}${C.reset}  ${C.bold}${t('audio.dubbed')}${C.reset}${C.dim} - Dubbed audio${C.reset}`], `\n  ${C.bold}${C.cyan}◈ ${t('audio.selectAudio')}${C.reset}`, { allowBack: true, statusBar });
         if (audioIdx === 1) audio = "dub";
         else if (audioIdx < 0) return;
     } else if (!hasSub && hasDub) audio = "dub";
@@ -1607,9 +1621,9 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 
     let isDownloadMode = false, isBatchMode = false;
     const actionOptions = [
-        `${C.green}▶${C.reset}  ${t('actions.streamOnline')}`,
-        `${C.cyan}⬇${C.reset}  ${t('actions.downloadSingleEpisode')}`,
-        `${C.magenta}⬇⬇${C.reset} ${t('actions.batchDownload')} (${C.bold}MKV${C.reset})`
+        `${C.green}▶${C.reset}  ${C.bold}${t('actions.streamOnline')}${C.reset}${C.dim}  ─ Fast & immediate playback${C.reset}`,
+        `${C.cyan}⬇${C.reset}  ${C.bold}${t('actions.downloadSingleEpisode')}${C.reset}${C.dim}  ─ Save for offline${C.reset}`,
+        `${C.magenta}⬇⬇${C.reset} ${C.bold}${t('actions.batchDownload')}${C.reset} ${C.dim}(${C.bold}MKV${C.dim})  ─ Download all episodes${C.reset}`
     ];
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.whatWouldYouLikeToDo')}${C.reset}`, { allowBack: true, statusBar });
     if (actionIdx < 0) return;
@@ -1852,18 +1866,19 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
             }
 
             const streamInfo = [];
-            streamInfo.push(`${C.bold}${C.green}${t('streaming.streamDetails')}${C.reset}`);
-            streamInfo.push(`${C.dim}Provider:${C.reset} ${selectedProvider.name}`);
-            streamInfo.push(`${C.dim}Audio:${C.reset} ${audio.toUpperCase()}`);
-            const filePreview = selectedStream.file.substring(0, 70);
-            streamInfo.push(`${C.dim}URL:${C.reset} ${filePreview}${selectedStream.file.length > 70 ? '...' : ''}`);
-            if (selectedStream.file.includes('.m3u8')) streamInfo.push(`${C.dim}Format:${C.reset} HLS (M3U8)`);
-            else if (selectedStream.file.includes('.mp4')) streamInfo.push(`${C.dim}Format:${C.reset} MP4`);
-            else if (selectedStream.file.includes('.mkv')) streamInfo.push(`${C.dim}Format:${C.reset} Matroska (MKV)`);
-            else streamInfo.push(`${C.dim}Format:${C.reset} ${selectedStream.file.split('.').pop().toUpperCase()}`);
-            if (selectedStream.allServers) streamInfo.push(`${C.dim}Available Servers:${C.reset} ${selectedStream.allServers.length}`);
-            if (selectedStream.tracks && selectedStream.tracks.length > 0) streamInfo.push(`${C.dim}Subtitles:${C.reset} ${selectedStream.tracks.length} track(s)`);
-            renderBox(`▶ ${t('boxes.streamReady')}`, streamInfo, C.cyan);
+            streamInfo.push(`${C.bold}${C.green}✓ ${t('streaming.streamDetails')}${C.reset}`);
+            streamInfo.push(`${C.yellow}🔗${C.reset} ${C.dim}Provider:${C.reset} ${C.bold}${selectedProvider.name}${C.reset}`);
+            const audioIcon = audio === 'sub' ? `${C.cyan}◈${C.reset}` : `${C.magenta}◈${C.reset}`;
+            streamInfo.push(`${audioIcon} ${C.dim}Audio:${C.reset} ${C.bold}${audio.toUpperCase()}${C.reset}`);
+            const filePreview = selectedStream.file.substring(0, 65);
+            streamInfo.push(`${C.dim}URL:${C.reset} ${C.dim}${filePreview}${selectedStream.file.length > 65 ? '...' : ''}${C.reset}`);
+            if (selectedStream.file.includes('.m3u8')) streamInfo.push(`${C.cyan}📡${C.reset} ${C.dim}Format:${C.reset} ${C.bold}HLS${C.reset} ${C.dim}(M3U8)${C.reset}`);
+            else if (selectedStream.file.includes('.mp4')) streamInfo.push(`${C.blue}📦${C.reset} ${C.dim}Format:${C.reset} ${C.bold}MP4${C.reset}`);
+            else if (selectedStream.file.includes('.mkv')) streamInfo.push(`${C.green}📦${C.reset} ${C.dim}Format:${C.reset} ${C.bold}MKV${C.reset}${C.dim} (Matroska)${C.reset}`);
+            else streamInfo.push(`${C.dim}Format:${C.reset} ${C.bold}${selectedStream.file.split('.').pop().toUpperCase()}${C.reset}`);
+            if (selectedStream.allServers) streamInfo.push(`${C.magenta}◈${C.reset} ${C.dim}Servers:${C.reset} ${C.cyan}${selectedStream.allServers.length}${C.reset} ${C.dim}available${C.reset}`);
+            if (selectedStream.tracks && selectedStream.tracks.length > 0) streamInfo.push(`${C.yellow}⚙${C.reset} ${C.dim}Subtitles:${C.reset} ${C.cyan}${selectedStream.tracks.length}${C.reset} ${C.dim}track(s)${C.reset}`);
+            renderBox(`${C.cyan}▶${C.reset} ${t('boxes.streamReady')}`, streamInfo, C.cyan);
 
             let selectedQuality = null;
             if (selectedStream.qualities && selectedStream.qualities.length > 1) {
@@ -1904,23 +1919,23 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 
             const boxContent = [
                 `${C.bold}${C.green}${animeTitle}${C.reset}`,
-                `${C.bold}Episode ${episodeNumStr}${C.reset}  ${episodeDisplay}`,
-                `${C.dim}${selectedProvider.name}  ${audioTag}  ${speedInfo}${qualityTag ? '  ' + qualityTag : ''}${C.reset}`
+                `${C.bold}${C.cyan}Episode ${episodeNumStr}${C.reset}  ${episodeDisplay}`,
+                `${C.yellow}${selectedProvider.name}${C.reset}  ${audioTag}  ${speedInfo}${qualityTag ? '  ' + qualityTag : ''}${C.reset}`
             ];
 
-            renderBox(`▶ ${t('boxes.nowPlaying')}`, boxContent, C.green);
+            renderBox(`${C.green}▶${C.reset} ${t('boxes.nowPlaying')}`, boxContent, C.green);
 
             saveToWatchlist(animeTitle, targetEpisode, audio, selectedMatches, effectiveTotalEpisodes ?? undefined, anilistId, 0, selectedQuality);
             await playWithMpv(selectedStream, `${animeTitle} — ${playingTitle}`, settings, animeTitle, targetEpisode, effectiveTotalEpisodes, audio, selectedProvider.name, 'stream-direct');
 
             if (targetEpisode < maxEpNum) {
-                console.log(`\n  ${C.green}✓ Episode ${targetEpisode} done${C.reset}`);
+                console.log(`\n  ${C.green}${C.bold}✓${C.reset} Episode ${C.bold}${targetEpisode}${C.reset} completed`);
                 const result = await bingeCountdownWithProgress(settings.bingeCountdownSeconds, targetEpisode + 1, audio, "", () => { const newAudio = audio === "sub" ? "dub" : "sub"; updateWatchlistAudio(animeTitle, newAudio); }, settings.autoPlayNext);
                 if (result.continue) {
-                    if (result.newAudio) { audio = result.newAudio; console.log(`  ${C.yellow}◈ Switched to ${audio.toUpperCase()}${C.reset}`); }
+                    if (result.newAudio) { audio = result.newAudio; console.log(`  ${C.yellow}◈${C.reset} Switched to ${C.bold}${audio.toUpperCase()}${C.reset}`); }
                     targetEpisode++;
                 } else { userWantsToContinue = false; }
-            } else { console.log(`  ${C.green}✓ Finished last episode!${C.reset}`); break; }
+            } else { console.log(`\n  ${C.green}${C.bold}✓${C.reset} Series complete! Watched all ${C.bold}${targetEpisode}${C.reset} episodes`); break; }
         } catch (err) {
             const errorMsg = err.message || String(err);
             debugLog(`Stream/playback error: ${errorMsg}`);
@@ -1956,9 +1971,9 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
 
     let isDownloadMode = false, isBatchMode = false;
     const actionOptions = [
-        `${C.green}▶${C.reset}  ${t('actions.streamOnline')}`,
-        `${C.cyan}⬇${C.reset}  ${t('actions.downloadSingleEpisode')}`,
-        `${C.magenta}⬇⬇${C.reset} ${t('actions.batchDownload')} (${C.bold}MKV${C.reset})`
+        `${C.green}▶${C.reset}  ${C.bold}${t('actions.streamOnline')}${C.reset}${C.dim}  ─ Fast & immediate playback${C.reset}`,
+        `${C.cyan}⬇${C.reset}  ${C.bold}${t('actions.downloadSingleEpisode')}${C.reset}${C.dim}  ─ Save for offline${C.reset}`,
+        `${C.magenta}⬇⬇${C.reset} ${C.bold}${t('actions.batchDownload')}${C.reset} ${C.dim}(${C.bold}MKV${C.dim})  ─ Download all episodes${C.reset}`
     ];
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.whatWouldYouLikeToDo')}${C.reset}`, { allowBack: true, statusBar });
     if (actionIdx < 0) return;
@@ -2386,27 +2401,32 @@ async function triggerWatchlistWorkflow(providersList) {
     }
     const options = list.map((item) => {
         const epStr = String(item.lastEpisode).padStart(2, '0');
-        let epDisplay = `${C.bold}E${epStr}${C.reset}`;
+        let epDisplay = `${C.bold}${C.green}E${epStr}${C.reset}`;
 
         if (item.season) {
             const seasonMap = { winter: '❄️', spring: '🌸', summer: '☀️', fall: '🍂' };
             const seasonEmoji = seasonMap[item.season.toLowerCase()] || '📺';
-            epDisplay = `${seasonEmoji} ${C.bold}S${epStr}${C.reset}`;
+            epDisplay = `${seasonEmoji} ${C.bold}${C.cyan}S${epStr}${C.reset}`;
             if (item.seasonYear) {
                 epDisplay += ` ${C.dim}(${item.seasonYear})${C.reset}`;
             }
         }
 
         if (item.totalEpisodes) {
-            epDisplay += `${C.dim}/${item.totalEpisodes}${C.reset}`;
+            epDisplay += `${C.dim}/${C.bold}${item.totalEpisodes}${C.reset}`;
         } else {
             epDisplay += `${C.dim}/?${C.reset}`;
         }
 
-        const audioTag = item.audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
+        const audioTag = item.audio === "sub" ? `${C.cyan}◈ SUB${C.reset}` : `${C.magenta}◈ DUB${C.reset}`;
         const dateStr = item.lastWatched ? new Date(item.lastWatched).toLocaleDateString() : item.timestamp?.split('T')[0] || '';
         const progressPercent = item.totalEpisodes ? Math.round((item.lastEpisode / item.totalEpisodes) * 100) : 0;
-        const progressBar = progressPercent > 0 ? ` ${C.dim}[${Math.round(progressPercent / 20)}█]${C.reset}` : '';
+        const barLength = 5;
+        let progressBar = '';
+        if (progressPercent > 0) {
+            const filled = Math.ceil((progressPercent / 100) * barLength);
+            progressBar = ` ${C.green}[${C.bold}${'▮'.repeat(filled)}${C.reset}${C.green}${' '.repeat(barLength - filled)}]${C.reset}`;
+        }
 
         return `${padRightVisible(item.title, 35)}  ${epDisplay}  ${audioTag}${progressBar}  ${C.dim}${dateStr}${C.reset}`;
     });
@@ -2425,16 +2445,17 @@ async function triggerWatchlistWorkflow(providersList) {
     const nextEpStr = String(nextEpNum).padStart(2, '0');
     const lastEpStr = String(targetItem.lastEpisode).padStart(2, '0');
     const totalHint = targetItem.totalEpisodes ? `/${targetItem.totalEpisodes}` : '/?';
+    const audioStatus = targetItem.audio === "sub" ? `${C.cyan}SUB${C.reset}` : `${C.magenta}DUB${C.reset}`;
     const actionOptions = [
-        `▶ Resume E${nextEpStr}${totalHint}`,
-        `↺ Replay E${lastEpStr}${totalHint}`,
-        `⏮ Start from E01`,
-        `✎ Edit progress`,
-        `◈ Toggle audio (${targetItem.audio.toUpperCase()})`,
-        `✓ Mark completed`,
-        `○ Mark unwatched`,
-        `⟳ Refresh total episodes`,
-        `✕ Remove from watchlist`,
+        `${C.green}▶${C.reset}  ${C.bold}Resume${C.reset} E${nextEpStr}${totalHint}`,
+        `${C.yellow}↺${C.reset}  Replay E${lastEpStr}${totalHint}`,
+        `${C.cyan}⏮${C.reset}  Start from E01`,
+        `${C.magenta}✎${C.reset}  Edit progress`,
+        `${C.blue}◈${C.reset}  Toggle audio (${audioStatus})`,
+        `${C.green}✓${C.reset}  Mark completed`,
+        `${C.dim}○${C.reset}  Mark unwatched`,
+        `${C.cyan}⟳${C.reset}  Refresh episodes`,
+        `${C.red}✕${C.reset}  Remove from watchlist`,
         `← Go back`
     ];
     const actionIdx = await selectMenuOption(actionOptions, `\n  ${C.bold}${C.cyan}◈ ${targetItem.title}${C.reset}`, { allowBack: true });
@@ -2506,24 +2527,24 @@ async function triggerSettingsWorkflow(providersCount) {
     while (true) {
         const settings = loadSettings();
         const options = [
-            `${t('settings.language')}          ${C.dim}${getLanguageName(settings.language)}${C.reset}`,
-            `Binge delay       ${C.dim}${settings.bingeCountdownSeconds}s${C.reset}`,
-            `${t('settings.defaultAudio')}     ${C.dim}${settings.defaultAudio === "sub" ? t('audio.subtitled') : t('audio.dubbed')}${C.reset}`,
-            `${t('settings.playbackSpeed')}    ${C.dim}${settings.playbackSpeed}x${C.reset}`,
-            `Auto-play next    ${settings.autoPlayNext ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `${t('settings.resumePlayback')}   ${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `Discord RPC       ${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `${t('settings.downloadDir')}      ${C.dim}${settings.downloadDir.length > 30 ? '...' + settings.downloadDir.slice(-27) : settings.downloadDir}${C.reset}`,
-            `${t('settings.downloadFormat')}   ${C.dim}${settings.downloadFormat.toUpperCase()}${C.reset}`,
-            `API base URL      ${C.dim}${settings.apiBaseUrl}${C.reset}`,
-            `Min similarity    ${C.dim}${settings.minSimilarityScore}%${C.reset}`,
-            `${t('settings.enableNotifications')}     ${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `Auto retry        ${settings.autoRetryFailed ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
-            `Clear cache`,
-            `Reset all settings`,
+            `${C.cyan}🌐${C.reset} ${t('settings.language')}${" ".repeat(20)}${C.dim}${getLanguageName(settings.language)}${C.reset}`,
+            `${C.yellow}⏱${C.reset}  Binge delay${" ".repeat(21)}${C.dim}${settings.bingeCountdownSeconds}s${C.reset}`,
+            `${C.magenta}🔊${C.reset} ${t('settings.defaultAudio')}${" ".repeat(12)}${C.dim}${settings.defaultAudio === "sub" ? t('audio.subtitled') : t('audio.dubbed')}${C.reset}`,
+            `${C.cyan}▶${C.reset}  ${t('settings.playbackSpeed')}${" ".repeat(15)}${C.dim}${settings.playbackSpeed}x${C.reset}`,
+            `${settings.autoPlayNext ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  Auto-play next${" ".repeat(18)}${settings.autoPlayNext ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${settings.resumePlayback ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  ${t('settings.resumePlayback')}${" ".repeat(8)}${settings.resumePlayback ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${settings.discordEnabled ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  Discord RPC${" ".repeat(21)}${settings.discordEnabled ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${C.green}📁${C.reset} ${t('settings.downloadDir')}${" ".repeat(10)}${C.dim}${settings.downloadDir.length > 30 ? '...' + settings.downloadDir.slice(-27) : settings.downloadDir}${C.reset}`,
+            `${C.blue}📦${C.reset} ${t('settings.downloadFormat')}${" ".repeat(13)}${C.dim}${settings.downloadFormat.toUpperCase()}${C.reset}`,
+            `${C.yellow}🔗${C.reset} API base URL${" ".repeat(19)}${C.dim}${settings.apiBaseUrl}${C.reset}`,
+            `${C.magenta}⚡${C.reset} Min similarity${" ".repeat(17)}${C.dim}${settings.minSimilarityScore}%${C.reset}`,
+            `${settings.enableNotifications ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  ${t('settings.enableNotifications')}${" ".repeat(3)}${settings.enableNotifications ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${settings.autoRetryFailed ? `${C.green}✓${C.reset}` : `${C.dim}○${C.reset}`}  Auto retry${" ".repeat(22)}${settings.autoRetryFailed ? `${C.green}ON${C.reset}` : `${C.dim}OFF${C.reset}`}`,
+            `${C.cyan}🗑${C.reset}  Clear cache`,
+            `${C.red}⚠${C.reset}  Reset all settings`,
             `${t('app.back')}`
         ];
-        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}◈ ${t('settings.title')}${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
+        const idx = await selectMenuOption(options, `\n  ${C.bold}${C.cyan}⚙${C.reset}  ${C.bold}${t('settings.title')}${C.reset}`, { allowBack: true, statusBar: { providersCount, apiUrl: settings.apiBaseUrl } });
         if (idx < 0 || idx === options.length - 1) return;
         switch (idx) {
             case 0:
@@ -2630,17 +2651,18 @@ async function triggerSettingsWorkflow(providersCount) {
 async function triggerProviderOverviewWorkflow(providersList) {
     if (!providersList) providersList = await createProviders(loadSettings().apiBaseUrl);
     clearScreen();
-    renderHeader("PROVIDERS", `${providersList.length} sources`);
+    renderHeader("PROVIDERS", `${providersList.length} sources available`);
     console.log();
     providersList.forEach((provider, idx) => {
         const num = String(idx + 1).padStart(2, "0");
-        console.log(`  ${C.dim}${num}${C.reset}  ${C.bold}${C.green}${provider.name}${C.reset}`);
+        const statusIcon = `${C.green}●${C.reset}`;
+        console.log(`  ${C.dim}${num}${C.reset}  ${statusIcon}  ${C.bold}${C.cyan}${provider.name}${C.reset}`);
     });
     console.log();
-    renderBox(t('app.info'), [
-        "All providers are searched in parallel.",
-        `API: ${loadSettings().apiBaseUrl}`
-    ], C.dim);
+    renderBox(`${C.blue}🌐${C.reset} ${t('app.info')}`, [
+        `${C.green}✓${C.reset} ${C.dim}All providers are searched in parallel for fast results${C.reset}`,
+        `${C.yellow}🔗${C.reset} ${C.dim}API: ${loadSettings().apiBaseUrl}${C.reset}`
+    ], C.blue);
     await pauseForKey();
 }
 
@@ -2665,8 +2687,8 @@ async function terminalEngine() {
     if (settings.enableUpdateCheck) {
         const latest = await checkForUpdates();
         if (latest) {
-            console.log(`\n  ${C.yellow}◈ Update available: ${latest}  (current: ${APP_VERSION})${C.reset}`);
-            console.log(`  ${C.dim}npm update -g @fampep/kittycli${C.reset}\n`);
+            console.log(`\n  ${C.yellow}${C.bold}⬆${C.reset} Update available: ${C.bold}${latest}${C.reset}  ${C.dim}(current: ${APP_VERSION})${C.reset}`);
+            console.log(`  ${C.dim}Run: npm update -g @fampep/kittycli${C.reset}\n`);
             await wait(2000);
         }
     }
@@ -2700,22 +2722,22 @@ async function terminalEngine() {
         renderHeader("KITTYCLI", `v${APP_VERSION}  ·  ${providersCount} providers`);
         const W = 72;
         const formatQuality = settings.downloadFormat.toUpperCase();
-        console.log(`\n  ${C.bold}${C.green}╭${"─".repeat(W)}╮${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.cyan}📺 Watchlist${C.reset}  ${C.bold}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 18 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.magenta}🔍 Searches${C.reset}  ${C.bold}${historyCount}${C.reset} saved${" ".repeat(W - 18 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.yellow}🌐 API${C.reset}       ${settings.apiBaseUrl.length > 42 ? settings.apiBaseUrl.substring(0, 39) + '...' : settings.apiBaseUrl}${" ".repeat(Math.max(0, W - 11 - Math.min(42, settings.apiBaseUrl.length)))}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}┌${"─".repeat(W)}┐${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.cyan}📺 Watchlist${C.reset}  ${C.bold}${C.green}${watchlistCount}${C.reset} item${watchlistCount !== 1 ? 's' : ''}${" ".repeat(W - 18 - String(watchlistCount).length)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.magenta}🔍 Searches${C.reset}  ${C.bold}${C.magenta}${historyCount}${C.reset} saved${" ".repeat(W - 18 - String(historyCount).length)}${C.bold}${C.green}│${C.reset}`);
+        console.log(`  ${C.bold}${C.green}│${C.reset}  ${C.yellow}🌐 API${C.reset}       ${C.dim}${settings.apiBaseUrl.length > 42 ? settings.apiBaseUrl.substring(0, 39) + '...' : settings.apiBaseUrl}${" ".repeat(Math.max(0, W - 11 - Math.min(42, settings.apiBaseUrl.length)))}${C.reset}${C.bold}${C.green}│${C.reset}`);
         console.log(`  ${C.bold}${C.green}│${C.reset}  ${settings.discordEnabled ? `${C.green}● Discord${C.reset}` : `${C.dim}○ Discord${C.reset}`}   ${C.dim}${formatQuality} downloads${C.reset}${" ".repeat(Math.max(0, W - 27))}${C.bold}${C.green}│${C.reset}`);
-        console.log(`  ${C.bold}${C.green}╰${"─".repeat(W)}╯${C.reset}\n`);
+        console.log(`  ${C.bold}${C.green}└${"─".repeat(W)}┘${C.reset}\n`);
         
         const mainOptions = [
-            `${C.green}🔍${C.reset} ${C.bold}${t('mainMenu.search')}${C.reset}`,
-            `${C.cyan}📜${C.reset} ${C.bold}${t('mainMenu.recentSearches')}${C.reset}  ${historyCount > 0 ? `${C.green}${historyCount}${C.reset}` : `${C.dim}none${C.reset}`}`,
-            `${C.magenta}📺${C.reset} ${C.bold}${t('mainMenu.watchlist')}${C.reset}        ${watchlistCount > 0 ? `${C.green}${watchlistCount}${C.reset}` : `${C.dim}empty${C.reset}`}`,
+            `${C.green}🔍${C.reset} ${C.bold}${t('mainMenu.search')}${C.reset}${C.dim}  ─ Find and stream anime${C.reset}`,
+            `${C.cyan}📜${C.reset} ${C.bold}${t('mainMenu.recentSearches')}${C.reset}  ${historyCount > 0 ? `${C.green}${historyCount}${C.reset}` : `${C.dim}none${C.reset}`}${C.dim} saved${C.reset}`,
+            `${C.magenta}📺${C.reset} ${C.bold}${t('mainMenu.watchlist')}${C.reset}        ${watchlistCount > 0 ? `${C.green}${watchlistCount}${C.reset}` : `${C.dim}empty${C.reset}`}${C.dim} items${C.reset}`,
             `${C.yellow}▶${C.reset} ${C.bold}${t('mainMenu.quickResume')}${C.reset}       ${watchlistCount > 0 ? `${C.green}ready${C.reset}` : `${C.dim}none${C.reset}`}`,
-            `${C.blue}🌐${C.reset} ${C.bold}${t('mainMenu.providers')}${C.reset}        ${C.cyan}${providersCount}${C.reset} ${C.dim}online${C.reset}`,
-            `${C.cyan}🐱${C.reset} ${C.bold}${t('mainMenu.github')}${C.reset}`,
-            `${C.green}⚙${C.reset} ${C.bold}${t('mainMenu.settings')}${C.reset}`,
-            `${C.yellow}❓${C.reset} ${C.bold}${t('mainMenu.helpAbout')}${C.reset}`,
+            `${C.blue}🌐${C.reset} ${C.bold}${t('mainMenu.providers')}${C.reset}        ${C.cyan}${providersCount}${C.reset} ${C.dim}available${C.reset}`,
+            `${C.cyan}🐱${C.reset} ${C.bold}${t('mainMenu.github')}${C.reset}${C.dim}         ─ View on GitHub${C.reset}`,
+            `${C.green}⚙${C.reset} ${C.bold}${t('mainMenu.settings')}${C.reset}${C.dim}        ─ Customize experience${C.reset}`,
+            `${C.yellow}❓${C.reset} ${C.bold}${t('mainMenu.helpAbout')}${C.reset}${C.dim}    ─ Show help and features${C.reset}`,
             `${C.dim}${t('mainMenu.exit')}${C.reset}`
         ];
         
@@ -2736,7 +2758,7 @@ async function terminalEngine() {
                 }
                 rl.close();
                 clearScreen();
-                console.log(`\n  ${C.green}✓ Goodbye!${C.reset}\n`);
+                console.log(`\n  ${C.green}${C.bold}✓${C.reset} Thanks for using ${C.bold}KittyCLI${C.reset}! See you next time~ ${C.cyan}🐱${C.reset}\n`);
                 return;
         }
     }
@@ -2744,7 +2766,7 @@ async function terminalEngine() {
 
 process.on('SIGINT', () => {
     if (discordRpc) discordRpc.destroy().catch(() => {});
-    console.log(`\n  ${C.green}✓ Goodbye!${C.reset}\n`);
+    console.log(`\n  ${C.green}${C.bold}✓${C.reset} Thanks for using ${C.bold}KittyCLI${C.reset}! See you next time~ ${C.cyan}🐱${C.reset}\n`);
     try { rl.close(); } catch(e) {}
     process.exit(0);
 });
