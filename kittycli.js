@@ -36,7 +36,7 @@ const C = {
     bgWhite: "\x1b[47m"
 };
 
-const APP_VERSION = "2.6.1";
+const APP_VERSION = "2.6.5";
 const GITLAB_PROJECT = "fampep/kitty-cli";
 const VERSION_CHECK_URL = `https://gitlab.com/api/v4/projects/${encodeURIComponent(GITLAB_PROJECT)}/releases/permalink/latest`;
 const GITHUB_URL = "https://github.com/fampep/Kitty-cli";
