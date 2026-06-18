@@ -21,7 +21,14 @@
     "noCloseMatches": "Ingen tætte match for \"{{query}}\"",
     "pickSource": "Vælg kilde",
     "viewDetails": "Se anime-detaljer",
-    "goToEpisodes": "Gå til episoder"
+    "goToEpisodes": "Gå til episoder",
+    "usingCachedResults": "Bruger cached resultater"
+  },
+  "actions": {
+    "streamOnline": "Stream online",
+    "downloadSingleEpisode": "Download en episode",
+    "batchDownload": "Batch download",
+    "whatWouldYouLikeToDo": "Hvad vil du gøre?"
   },
   "streaming": {
     "launching": "starter mpv...",
@@ -41,7 +48,9 @@
     "url": "URL",
     "format": "Format",
     "availableServers": "Tilgængelige servere",
-    "subtitles": "Undertekster"
+    "subtitles": "Undertekster",
+    "fetchingAnimeMetadata": "Henter anime-metadata...",
+    "selectEpisode": "Vælg episode"
   },
   "episodes": {
     "title": "Episoder",
@@ -56,7 +65,9 @@
     "sub": "UNDERTEKST",
     "dub": "DUB",
     "audioNotAvailable": "{{audio}} ikke tilgængelig for denne episode",
-    "fallbackTo": "Falder tilbage til {{audio}}"
+    "fallbackTo": "Falder tilbage til {{audio}}",
+    "subtitled": "Med undertekster",
+    "dubbed": "Dubbet"
   },
   "download": {
     "title": "Download",
@@ -67,7 +78,9 @@
     "downloading": "Downloader...",
     "downloadComplete": "Download fuldført!",
     "downloadFailed": "Download mislykkedes",
-    "selectFolder": "Vælg download-mappe"
+    "selectFolder": "Vælg download-mappe",
+    "selectEpisodesForBatch": "Vælg episoder til batch download",
+    "queuedForDownload": "Sat i kø til download"
   },
   "binge": {
     "title": "Binge-tilstand",
@@ -78,6 +91,7 @@
   },
   "settings": {
     "title": "Indstillinger",
+    "language": "Sprog",
     "defaultAudio": "Standardlyd",
     "playbackSpeed": "Afspilningshastighed",
     "downloadFormat": "Download-format",
@@ -86,19 +100,24 @@
     "discordEnabled": "Discord-tilstedeværelse",
     "enableNotifications": "Notifikationer",
     "preferredQuality": "Foretrukken kvalitet",
-    "mpvArgs": "MPV-argumenter"
+    "mpvArgs": "MPV-argumenter",
+    "selectLanguage": "Vælg sprog",
+    "currentLanguage": "Nuværende sprog"
   },
   "errors": {
     "mpvNotInstalled": "mpv er ikke installeret. kan ikke afspille video.",
     "streamNotFound": "Stream ikke fundet",
     "apiError": "API-fejl",
     "timeout": "Anmodning løb ud af tid",
-    "networkError": "Netværksfejl"
+    "networkError": "Netværksfejl",
+    "failedToFetchStream": "Kunne ikke hente stream fra nogen udbyder",
+    "fallingBackToLegacy": "Falder tilbage til ældre metode..."
   },
   "messages": {
     "savedToWatchlist": "Gemt på ønskeliste",
     "removedFromWatchlist": "Fjernet fra ønskeliste",
     "settingsSaved": "Indstillinger gemt",
-    "cacheCleared": "Cache ryddet"
+    "cacheCleared": "Cache ryddet",
+    "fetchingStreamInfoFromProviders": "Henter stream-info fra udbydere..."
   }
 }

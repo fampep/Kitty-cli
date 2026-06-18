@@ -21,7 +21,14 @@
     "noCloseMatches": "No close matches for \"{{query}}\"",
     "pickSource": "Pick source",
     "viewDetails": "View anime details",
-    "goToEpisodes": "Go to episodes"
+    "goToEpisodes": "Go to episodes",
+    "usingCachedResults": "Using cached results"
+  },
+  "actions": {
+    "streamOnline": "Stream online",
+    "downloadSingleEpisode": "Download single episode",
+    "batchDownload": "Batch download",
+    "whatWouldYouLikeToDo": "What would you like to do?"
   },
   "streaming": {
     "launching": "launching mpv...",
@@ -41,7 +48,9 @@
     "url": "URL",
     "format": "Format",
     "availableServers": "Available Servers",
-    "subtitles": "Subtitles"
+    "subtitles": "Subtitles",
+    "fetchingAnimeMetadata": "Fetching anime metadata...",
+    "selectEpisode": "Select episode"
   },
   "episodes": {
     "title": "Episodes",
@@ -56,7 +65,9 @@
     "sub": "SUB",
     "dub": "DUB",
     "audioNotAvailable": "{{audio}} not available for this episode",
-    "fallbackTo": "Falling back to {{audio}}"
+    "fallbackTo": "Falling back to {{audio}}",
+    "subtitled": "Subtitled",
+    "dubbed": "Dubbed"
   },
   "download": {
     "title": "Download",
@@ -67,7 +78,9 @@
     "downloading": "Downloading...",
     "downloadComplete": "Download complete!",
     "downloadFailed": "Download failed",
-    "selectFolder": "Select download folder"
+    "selectFolder": "Select download folder",
+    "selectEpisodesForBatch": "Select episodes for batch download",
+    "queuedForDownload": "Queued for download"
   },
   "binge": {
     "title": "Binge Mode",
@@ -78,6 +91,7 @@
   },
   "settings": {
     "title": "Settings",
+    "language": "Language",
     "defaultAudio": "Default audio",
     "playbackSpeed": "Playback speed",
     "downloadFormat": "Download format",
@@ -86,19 +100,24 @@
     "discordEnabled": "Discord presence",
     "enableNotifications": "Notifications",
     "preferredQuality": "Preferred quality",
-    "mpvArgs": "MPV arguments"
+    "mpvArgs": "MPV arguments",
+    "selectLanguage": "Select language",
+    "currentLanguage": "Current language"
   },
   "errors": {
     "mpvNotInstalled": "mpv not installed. cannot play video.",
     "streamNotFound": "Stream not found",
     "apiError": "API error",
     "timeout": "Request timeout",
-    "networkError": "Network error"
+    "networkError": "Network error",
+    "failedToFetchStream": "Failed to fetch stream from any provider",
+    "fallingBackToLegacy": "Falling back to legacy flow..."
   },
   "messages": {
     "savedToWatchlist": "Saved to watchlist",
     "removedFromWatchlist": "Removed from watchlist",
     "settingsSaved": "Settings saved",
-    "cacheCleared": "Cache cleared"
+    "cacheCleared": "Cache cleared",
+    "fetchingStreamInfoFromProviders": "Fetching stream info from providers..."
   }
 }
