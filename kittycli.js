@@ -85,7 +85,7 @@ const defaultSettings = {
     enabledProviders: [
         "Miruro", "MKissa", "ReAnime", "KickAssAnime", "Animo", "AniZone", "Anikoto",
         "AnimeGG", "Senshi", "Animetsu", "AnimeOnsen", "AllAnime", "Nyanime", "AniDao",
-        "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko"
+        "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko", "Anizen"
     ]
 };
 

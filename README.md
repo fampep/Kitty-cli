@@ -177,9 +177,9 @@ mpv $stream.file
 curl "https://kittyapi.buzz/provider/Miruro/stream-direct?anilistId=20&episode=1&audio=sub" | jq '.file'
 ```
 
-### Supported Providers (21 Total)
+### Supported Providers (22 Total)
 
-Miruro, AllAnime, ReAnime, Anitaku, Anikage, AnimeHeaven, KaaLt, MKissa, Senshi, Animetsu, AnimeParadise, AniDao, AniNeko, Animeverse, Animo, AniZone, Anikoto, AnimeGG, AnimeOnsen, AniDB, Anineko
+Miruro, AllAnime, ReAnime, Anitaku, Anikage, AnimeHeaven, KaaLt, MKissa, Senshi, Animetsu, AnimeParadise, AniDao, AniNeko, Animeverse, Animo, AniZone, Anikoto, AnimeGG, AnimeOnsen, AniDB, Anineko, Anizen
 
 ### Features
 
