@@ -92,36 +92,112 @@ Key options:
 └── debug.log            # Debug logs
 ```
 
-## AniList ID Support
+## Stream-Direct API
 
-The app uses AniList IDs for direct, instant streaming across all **21 providers** via the stream-direct endpoint.
+The fastest way to get video streams using AniList IDs. Single API call returns all available servers, quality options, and metadata for an episode.
 
-### Stream-Direct Endpoint
-The fastest way to get video streams with a single API call:
-- Single call returns all available servers for an episode
-- Automatically handles HLS/MP4/MKV formats
-- Returns multiple server options to choose from
-- Includes subtitle tracks, quality info, and headers
+### Endpoint Format
+```
+GET /provider/{provider}/stream-direct?anilistId={id}&episode={ep}&audio={audio}
+```
 
-Example:
+### Example Request
 ```
 GET /provider/Miruro/stream-direct?anilistId=20&episode=1&audio=sub
 ```
 
-Response includes:
-- Primary stream URL with headers (Referer, Origin)
-- `allServers` array with multiple CDN options
-- Quality information for each server
-- Subtitle tracks with language labels
-- Provider and server metadata
+### Example Response
+```json
+{
+  "file": "https://cdn.example.com/video.m3u8",
+  "headers": {
+    "Referer": "https://miruro.tv/",
+    "Origin": "https://miruro.tv"
+  },
+  "tracks": [
+    {
+      "file": "https://subtitle.url/...",
+      "label": "English",
+      "srclang": "en",
+      "kind": "subtitles"
+    }
+  ],
+  "allServers": [
+    {
+      "file": "https://cdn1.example.com/video.m3u8",
+      "quality": "HD-1",
+      "headers": { "Referer": "https://miruro.tv/" }
+    },
+    {
+      "file": "https://cdn2.example.com/video.m3u8",
+      "quality": "HD-2",
+      "headers": { "Referer": "https://miruro.tv/" }
+    }
+  ],
+  "provider": "Miruro",
+  "server": "Kwik.cx HLS",
+  "episode": 1,
+  "anilistId": 20,
+  "cached": false
+}
+```
+
+### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `file` | string | Primary stream URL |
+| `headers` | object | HTTP headers (Referer, Origin, etc.) |
+| `tracks` | array | Subtitle tracks with language info |
+| `allServers` | array | All available CDN servers for this episode |
+| `provider` | string | Provider name |
+| `server` | string | Server/CDN name |
+| `episode` | number | Episode number |
+| `anilistId` | number | AniList ID |
+| `cached` | boolean | Whether response was cached |
+
+### Code Examples
+
+**JavaScript:**
+```javascript
+const res = await fetch('https://kittyapi.buzz/provider/Miruro/stream-direct?anilistId=20&episode=1');
+const stream = await res.json();
+console.log(stream.file);        // Primary stream
+console.log(stream.allServers);  // All available servers
+```
+
+**PowerShell:**
+```powershell
+$stream = Invoke-WebRequest "https://kittyapi.buzz/provider/Miruro/stream-direct?anilistId=20&episode=1" -UseBasicParsing | ConvertFrom-Json
+mpv $stream.file
+```
+
+**cURL:**
+```bash
+curl "https://kittyapi.buzz/provider/Miruro/stream-direct?anilistId=20&episode=1&audio=sub" | jq '.file'
+```
+
+### Supported Providers (21 Total)
+
+Miruro, AllAnime, ReAnime, Anitaku, Anikage, AnimeHeaven, KaaLt, MKissa, Senshi, Animetsu, AnimeParadise, AniDao, AniNeko, Animeverse, Animo, AniZone, Anikoto, AnimeGG, AnimeOnsen, AniDB, Anineko
+
+### Features
+
+- **Single API Call** - Get complete stream info in one request
+- **Multiple Servers** - `allServers` array with all available CDNs
+- **Auto Headers** - Proper Referer/Origin headers included
+- **Subtitle Support** - Built-in subtitle track information
+- **Quality Info** - Multiple quality options per server
+- **Caching** - 30-minute TTL for repeated requests
+- **Fast Failover** - CLI automatically selects from available servers
+
+### In the CLI
 
 When available, the CLI automatically:
-1. Calls `/stream-direct` for one-call streaming (fastest)
-2. If multiple servers available, lets you select your preferred CDN
-3. Falls back to traditional search/episodes/servers flow if needed
-
-Supported providers with direct AniList streaming (21 total):
-Miruro, MKissa, ReAnime, KickAssAnime, Animo, AniZone, Anikoto, AnimeGG, Senshi, Animetsu, AnimeOnsen, AllAnime, Nyanime, AniDao, Animeverse, AnimeHeaven, AniNeko, AnimeParadise, KaaLt, AniDB, Anineko
+1. Uses stream-direct for one-call streaming (fastest)
+2. Lets you select from multiple servers if available
+3. Handles headers and authentication automatically
+4. Falls back to traditional search if needed
 
 ## Troubleshooting
 

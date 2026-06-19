@@ -735,8 +735,21 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
     }
     return new Promise(async (resolve) => {
         console.log(`\n  ${C.cyan}◈${C.reset} ${C.bold}${t('streaming.launching')}${C.reset}`);
-        const referrer = stream.headers?.Referer || stream.referer || '';
-        const origin = stream.headers?.Origin || stream.origin || '';
+
+        // Extract headers from response, with fallback to older formats
+        let referrer = '';
+        let origin = '';
+
+        if (stream.headers && typeof stream.headers === 'object') {
+            referrer = stream.headers.Referer || stream.headers.referer || '';
+            origin = stream.headers.Origin || stream.headers.origin || '';
+        }
+        // Fallback to direct properties
+        if (!referrer) referrer = stream.referer || '';
+        if (!origin) origin = stream.origin || '';
+
+        // Use stream URL as fallback referrer if not provided
+        if (!referrer && stream.file) referrer = stream.file;
         const subsDir = path.join(DATA_DIR, 'subs', animeTitle.replace(/[<>:"/\\|?*]/g, '_'));
         const audioLabel = audio === "dub" ? "DUB" : "SUB";
         const speedLabel = settings.playbackSpeed !== 1.0 ? ` @ ${settings.playbackSpeed}x` : "";
@@ -894,7 +907,22 @@ async function resumeableDownload(serverDetails, suggestedFilename, onProgress, 
 
     if (!partial) {
         renderBox(t('boxes.savingTo'), [downloadPath], C.cyan);
-        const headers = { Referer: serverDetails.headers?.Referer || serverDetails.referer || '', Origin: serverDetails.headers?.Origin || serverDetails.origin || '' };
+
+        // Extract headers with proper fallback chain
+        let referer = '';
+        let origin = '';
+
+        if (serverDetails.headers && typeof serverDetails.headers === 'object') {
+            referer = serverDetails.headers.Referer || serverDetails.headers.referer || '';
+            origin = serverDetails.headers.Origin || serverDetails.headers.origin || '';
+        }
+        // Fallback to direct properties
+        if (!referer) referer = serverDetails.referer || '';
+        if (!origin) origin = serverDetails.origin || '';
+        // Use file URL as last resort for referer
+        if (!referer && serverDetails.file) referer = serverDetails.file;
+
+        const headers = { Referer: referer, Origin: origin };
         partial = { url: serverDetails.file, outputPath: downloadPath, downloadedBytes: 0, totalBytes: 0, headers: headers };
     }
 
@@ -1322,10 +1350,43 @@ class ApiProvider {
                 timeout: 10000 // Reduced from 15s to 10s for faster failure detection
             });
             const stream = response.data;
+
+            // Ensure file URL is properly set
             if (stream && !stream.file && stream.url) stream.file = stream.url;
+
+            // Process headers if present
+            if (stream.headers && typeof stream.headers === 'object') {
+                // Ensure headers are available for playback
+                if (!stream.headers.Referer && !stream.referer && stream.file) {
+                    stream.headers.Referer = stream.file;
+                }
+            }
+
+            // Process subtitle tracks
             if (stream.tracks && Array.isArray(stream.tracks)) {
                 for (const track of stream.tracks) {
                     if (!track.file && track.url) track.file = track.url;
+                    // Ensure track has label
+                    if (!track.label && track.lang) track.label = track.lang;
+                    // Ensure srclang for subtitle tracks
+                    if (!track.srclang && track.label) {
+                        const langMap = { english: 'en', spanish: 'es', french: 'fr', japanese: 'ja', german: 'de' };
+                        track.srclang = langMap[track.label.toLowerCase()] || 'en';
+                    }
+                }
+            }
+
+            // Process allServers array if present
+            if (stream.allServers && Array.isArray(stream.allServers)) {
+                for (const server of stream.allServers) {
+                    // Ensure each server has a file URL
+                    if (!server.file && server.url) server.file = server.url;
+                    // Ensure quality label is present
+                    if (!server.quality && server.label) server.quality = server.label;
+                    // Ensure headers are present for each server
+                    if (!server.headers && stream.headers) {
+                        server.headers = { ...stream.headers };
+                    }
                 }
             }
 
@@ -1421,8 +1482,30 @@ async function batchDownloadQueueStreamDirect(jobs, coreTitle, statusBar, select
                 continue;
             }
 
+            // Display stream metadata
+            if (stream.provider) console.log(`  ${C.dim}Provider:${C.reset} ${C.bold}${stream.provider}${C.reset}`);
+            if (stream.server) console.log(`  ${C.dim}Server:${C.reset} ${C.bold}${stream.server}${C.reset}`);
+            if (stream.cached !== undefined) console.log(`  ${C.dim}Status:${C.reset} ${stream.cached ? `${C.green}cached${C.reset}` : `${C.yellow}live${C.reset}`}`);
+
+            // Handle quality selection from response
             if (selectedQuality && stream.qualityUrls && stream.qualityUrls[selectedQuality]) {
                 stream.file = stream.qualityUrls[selectedQuality];
+                console.log(`  ${C.dim}Quality:${C.reset} ${C.bold}${selectedQuality}${C.reset}`);
+            }
+
+            // Handle server selection if multiple available
+            if (stream.allServers && stream.allServers.length > 1) {
+                // Use first server or preferred quality server
+                const selectedServer = selectedQuality
+                    ? stream.allServers.find(s => s.quality?.includes(selectedQuality)) || stream.allServers[0]
+                    : stream.allServers[0];
+                if (selectedServer && selectedServer.file) {
+                    stream.file = selectedServer.file;
+                    if (selectedServer.headers) {
+                        stream.headers = { ...stream.headers, ...selectedServer.headers };
+                    }
+                    console.log(`  ${C.dim}Using server:${C.reset} ${C.bold}${selectedServer.quality || 'default'}${C.reset}`);
+                }
             }
 
             await resumeableDownload(stream, filename, null, ext);
@@ -1711,13 +1794,15 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 
             return selectedMatches
                 .map((match, i) => ({ provider: match.provider, stream: streams[i] }))
-                .filter(x => x.stream && x.stream.file);
+                .filter(x => x.stream && (x.stream.file || x.stream));
         });
 
         if (allProviderStreams.length > 1) {
             const providerOptions = allProviderStreams.map(({ provider, stream }) => {
-                const qualityStr = stream.qualities && stream.qualities.length > 0 ? stream.qualities[0] : 'Default';
-                return `${provider.name} • ${qualityStr} • ${stream.file.includes('.m3u8') ? 'HLS' : 'MP4'}`;
+                const file = stream.file || stream.url || '';
+                const qualityStr = stream.quality || (stream.qualities && stream.qualities.length > 0 ? stream.qualities[0] : 'Default');
+                const serversInfo = stream.allServers ? ` (${stream.allServers.length} servers)` : '';
+                return `${provider.name} • ${qualityStr} • ${file.includes('.m3u8') ? 'HLS' : 'MP4'}${serversInfo}`;
             });
             const providerIdx = await selectMenuOption(providerOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectProvider')}${C.reset}`, { allowBack: true, statusBar });
             if (providerIdx >= 0) {
@@ -1732,7 +1817,11 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
         } else if (allProviderStreams.length === 1) {
             selectedProvider = allProviderStreams[0].provider;
             const sampleStream = allProviderStreams[0].stream;
-            if (sampleStream && sampleStream.qualities && sampleStream.qualities.length > 1) {
+            if (sampleStream && sampleStream.allServers && sampleStream.allServers.length > 1) {
+                const serverOptions = sampleStream.allServers.map((s, i) => `${s.quality || `Server ${i+1}`} • ${s.file ? (s.file.includes('.m3u8') ? 'HLS' : 'MP4') : 'Unknown'}`);
+                const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectProvider')}${C.reset}`, { allowBack: true, statusBar });
+                if (serverIdx >= 0) selectedQuality = sampleStream.allServers[serverIdx].quality;
+            } else if (sampleStream && sampleStream.qualities && sampleStream.qualities.length > 1) {
                 const qualityOptions = sampleStream.qualities.map(q => `${q}`);
                 const qualityIdx = await selectMenuOption(qualityOptions, `\n  ${C.bold}${C.cyan}◈ ${t('streaming.selectQuality')}${C.reset}`, { allowBack: true, statusBar });
                 if (qualityIdx >= 0) selectedQuality = sampleStream.qualities[qualityIdx];
@@ -1763,7 +1852,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 
             return selectedMatches
                 .map((match, i) => ({ provider: match.provider, stream: streams[i] }))
-                .filter(x => x.stream && x.stream.file);
+                .filter(x => x.stream && (x.stream.file || x.stream));
         });
 
         if (allProviderStreams.length === 0) {
@@ -1836,7 +1925,7 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
 
                 return selectedMatches
                     .map((match, i) => ({ provider: match.provider, stream: streams[i] }))
-                    .filter(x => x.stream && x.stream.file);
+                    .filter(x => x.stream && (x.stream.file || x.stream));
             });
 
             if (allProviderStreams.length === 0) {
@@ -1876,30 +1965,68 @@ async function handleAnimeSelectionStreamDirect(selectedMatches, animeTitle) {
             if (selectedStream.allServers && selectedStream.allServers.length > 1) {
                 const serverOptions = selectedStream.allServers.map((s, i) => {
                     const quality = s.quality || `Server ${i+1}`;
-                    const preview = s.file.substring(0, 50);
-                    return `${C.cyan}${quality}${C.reset}  ${C.dim}${preview}${s.file.length > 50 ? '...' : ''}${C.reset}`;
+                    const preview = s.file ? s.file.substring(0, 50) : 'N/A';
+                    const format = s.file?.includes('.m3u8') ? 'HLS' : 'MP4';
+                    return `${C.cyan}${quality}${C.reset}  ${C.dim}${format}  ${preview}${s.file && s.file.length > 50 ? '...' : ''}${C.reset}`;
                 });
                 const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.multipleServersAvailable')}${C.reset}`, { allowBack: false, statusBar });
                 if (serverIdx >= 0 && selectedStream.allServers[serverIdx]) {
-                    selectedStream.file = selectedStream.allServers[serverIdx].file;
-                    if (selectedStream.allServers[serverIdx].headers) selectedStream.headers = selectedStream.allServers[serverIdx].headers;
-                    console.log(`  ${C.dim}${t('boxes.selectedServer')}: ${selectedStream.allServers[serverIdx].quality || `Server ${serverIdx+1}`}${C.reset}`);
+                    const selectedServer = selectedStream.allServers[serverIdx];
+                    selectedStream.file = selectedServer.file;
+                    // Merge server-specific headers with response headers
+                    if (selectedServer.headers) {
+                        selectedStream.headers = { ...selectedStream.headers, ...selectedServer.headers };
+                    }
+                    console.log(`  ${C.green}✓${C.reset} ${C.dim}Selected:${C.reset} ${C.bold}${selectedServer.quality || `Server ${serverIdx+1}`}${C.reset}`);
                 }
             }
 
             const streamInfo = [];
             streamInfo.push(`${C.bold}${C.green}✓ ${t('streaming.streamDetails')}${C.reset}`);
-            streamInfo.push(`${C.yellow}🔗${C.reset} ${C.dim}Provider:${C.reset} ${C.bold}${selectedProvider.name}${C.reset}`);
+
+            // Display provider name from response or use selected provider
+            const providerName = selectedStream.provider || selectedProvider.name;
+            streamInfo.push(`${C.yellow}🔗${C.reset} ${C.dim}Provider:${C.reset} ${C.bold}${providerName}${C.reset}`);
+
+            // Display server/CDN name from response if available
+            if (selectedStream.server) {
+                streamInfo.push(`${C.cyan}🖧${C.reset} ${C.dim}Server:${C.reset} ${C.bold}${selectedStream.server}${C.reset}`);
+            }
+
             const audioIcon = audio === 'sub' ? `${C.cyan}◈${C.reset}` : `${C.magenta}◈${C.reset}`;
             streamInfo.push(`${audioIcon} ${C.dim}Audio:${C.reset} ${C.bold}${audio.toUpperCase()}${C.reset}`);
+
+            // Display episode number from response
+            if (selectedStream.episode !== undefined) {
+                streamInfo.push(`${C.green}📺${C.reset} ${C.dim}Episode:${C.reset} ${C.bold}${selectedStream.episode}${C.reset}`);
+            }
+
             const filePreview = selectedStream.file.substring(0, 65);
             streamInfo.push(`${C.dim}URL:${C.reset} ${C.dim}${filePreview}${selectedStream.file.length > 65 ? '...' : ''}${C.reset}`);
+
+            // Display file format
             if (selectedStream.file.includes('.m3u8')) streamInfo.push(`${C.cyan}📡${C.reset} ${C.dim}Format:${C.reset} ${C.bold}HLS${C.reset} ${C.dim}(M3U8)${C.reset}`);
             else if (selectedStream.file.includes('.mp4')) streamInfo.push(`${C.blue}📦${C.reset} ${C.dim}Format:${C.reset} ${C.bold}MP4${C.reset}`);
             else if (selectedStream.file.includes('.mkv')) streamInfo.push(`${C.green}📦${C.reset} ${C.dim}Format:${C.reset} ${C.bold}MKV${C.reset}${C.dim} (Matroska)${C.reset}`);
             else streamInfo.push(`${C.dim}Format:${C.reset} ${C.bold}${selectedStream.file.split('.').pop().toUpperCase()}${C.reset}`);
-            if (selectedStream.allServers) streamInfo.push(`${C.magenta}◈${C.reset} ${C.dim}Servers:${C.reset} ${C.cyan}${selectedStream.allServers.length}${C.reset} ${C.dim}available${C.reset}`);
-            if (selectedStream.tracks && selectedStream.tracks.length > 0) streamInfo.push(`${C.yellow}⚙${C.reset} ${C.dim}Subtitles:${C.reset} ${C.cyan}${selectedStream.tracks.length}${C.reset} ${C.dim}track(s)${C.reset}`);
+
+            // Display available servers
+            if (selectedStream.allServers && selectedStream.allServers.length > 0) {
+                streamInfo.push(`${C.magenta}◈${C.reset} ${C.dim}Servers:${C.reset} ${C.cyan}${selectedStream.allServers.length}${C.reset} ${C.dim}available${C.reset}`);
+            }
+
+            // Display subtitle tracks
+            if (selectedStream.tracks && selectedStream.tracks.length > 0) {
+                const trackLabels = selectedStream.tracks.map(t => t.label || t.lang || 'default').join(', ');
+                streamInfo.push(`${C.yellow}⚙${C.reset} ${C.dim}Subtitles:${C.reset} ${C.cyan}${selectedStream.tracks.length}${C.reset} ${C.dim}(${trackLabels})${C.reset}`);
+            }
+
+            // Display cache status if available
+            if (selectedStream.cached !== undefined) {
+                const cacheStatus = selectedStream.cached ? `${C.green}cached${C.reset}` : `${C.yellow}live${C.reset}`;
+                streamInfo.push(`${C.dim}Status:${C.reset} ${cacheStatus}`);
+            }
+
             renderBox(`${C.cyan}▶${C.reset} ${t('boxes.streamReady')}`, streamInfo, C.cyan);
 
             let selectedQuality = null;
@@ -2253,25 +2380,69 @@ async function handleAnimeSelection(selectedMatches, startingEpisode, lockedAudi
             if (stream && !stream.file && stream.url) stream.file = stream.url;
 
             if (stream.allServers && stream.allServers.length > 1) {
-                const serverOptions = stream.allServers.map((s, i) => `${C.cyan}${s.quality || `Server ${i+1}`}${C.reset}  ${s.file.substring(0, 60)}${s.file.length > 60 ? '...' : ''}`);
+                const serverOptions = stream.allServers.map((s, i) => {
+                    const quality = s.quality || `Server ${i+1}`;
+                    const format = s.file?.includes('.m3u8') ? 'HLS' : 'MP4';
+                    const preview = s.file ? s.file.substring(0, 45) : 'N/A';
+                    return `${C.cyan}${quality}${C.reset}  ${C.dim}${format}  ${preview}${s.file && s.file.length > 45 ? '...' : ''}${C.reset}`;
+                });
                 const serverIdx = await selectMenuOption(serverOptions, `\n  ${C.bold}${C.cyan}◈ ${t('menus.multipleServersAvailable')}${C.reset}`, { allowBack: false, statusBar });
                 if (serverIdx >= 0 && stream.allServers[serverIdx]) {
-                    stream.file = stream.allServers[serverIdx].file;
-                    if (stream.allServers[serverIdx].headers) stream.headers = stream.allServers[serverIdx].headers;
+                    const selectedServer = stream.allServers[serverIdx];
+                    stream.file = selectedServer.file;
+                    // Merge server-specific headers
+                    if (selectedServer.headers) {
+                        stream.headers = { ...stream.headers, ...selectedServer.headers };
+                    }
+                    console.log(`  ${C.green}✓${C.reset} ${C.dim}Selected:${C.reset} ${C.bold}${selectedServer.quality || `Server ${serverIdx+1}`}${C.reset}`);
                 }
             }
 
             const streamInfo = [];
             streamInfo.push(`${C.bold}${C.green}${t('streaming.streamDetails')}${C.reset}`);
-            streamInfo.push(`${C.dim}Provider:${C.reset} ${stream.provider || selectedProvider.name}`);
-            streamInfo.push(`${C.dim}Server:${C.reset} ${stream.server || 'Default'}`);
+
+            // Display provider from response or fallback to selected provider
+            const providerDisplay = stream.provider ? `${C.bold}${stream.provider}${C.reset}` : `${C.bold}${selectedProvider.name}${C.reset}`;
+            streamInfo.push(`${C.dim}Provider:${C.reset} ${providerDisplay}`);
+
+            // Display server/CDN info if available
+            if (stream.server) {
+                streamInfo.push(`${C.dim}Server:${C.reset} ${C.bold}${stream.server}${C.reset}`);
+            } else if (selectedServerName) {
+                streamInfo.push(`${C.dim}Server:${C.reset} ${C.bold}${selectedServerName}${C.reset}`);
+            }
+
+            // Display episode info if available
+            if (stream.episode !== undefined) {
+                streamInfo.push(`${C.dim}Episode:${C.reset} ${C.bold}${stream.episode}${C.reset}`);
+            }
+
             streamInfo.push(`${C.dim}URL:${C.reset} ${stream.file.substring(0, 70)}${stream.file.length > 70 ? '...' : ''}`);
-            if (stream.file.includes('.m3u8')) streamInfo.push(`${C.dim}Format:${C.reset} HLS (M3U8)`);
-            else if (stream.file.includes('.mp4')) streamInfo.push(`${C.dim}Format:${C.reset} MP4`);
-            else if (stream.file.includes('.mkv')) streamInfo.push(`${C.dim}Format:${C.reset} Matroska (MKV)`);
-            else streamInfo.push(`${C.dim}Format:${C.reset} ${stream.file.split('.').pop().toUpperCase()}`);
-            if (stream.allServers) streamInfo.push(`${C.dim}Total Servers:${C.reset} ${stream.allServers.length}`);
-            if (stream.tracks && stream.tracks.length > 0) streamInfo.push(`${C.dim}Subtitles:${C.reset} ${stream.tracks.length} track(s)`);
+
+            // Display format
+            if (stream.file.includes('.m3u8')) streamInfo.push(`${C.dim}Format:${C.reset} ${C.bold}HLS${C.reset} (M3U8)`);
+            else if (stream.file.includes('.mp4')) streamInfo.push(`${C.dim}Format:${C.reset} ${C.bold}MP4${C.reset}`);
+            else if (stream.file.includes('.mkv')) streamInfo.push(`${C.dim}Format:${C.reset} ${C.bold}Matroska${C.reset} (MKV)`);
+            else streamInfo.push(`${C.dim}Format:${C.reset} ${C.bold}${stream.file.split('.').pop().toUpperCase()}${C.reset}`);
+
+            // Display available servers
+            if (stream.allServers && stream.allServers.length > 0) {
+                const serverQualityList = stream.allServers.map(s => s.quality || 'default').join(', ');
+                streamInfo.push(`${C.dim}Available:${C.reset} ${C.cyan}${stream.allServers.length}${C.reset} server(s) (${serverQualityList})`);
+            }
+
+            // Display subtitle tracks with languages
+            if (stream.tracks && stream.tracks.length > 0) {
+                const trackLabels = stream.tracks.map(t => t.label || t.lang || 'default').join(', ');
+                streamInfo.push(`${C.dim}Subtitles:${C.reset} ${C.cyan}${stream.tracks.length}${C.reset} track(s) (${trackLabels})`);
+            }
+
+            // Display cache status if available
+            if (stream.cached !== undefined) {
+                const cacheStatus = stream.cached ? `${C.green}cached${C.reset}` : `${C.yellow}live${C.reset}`;
+                streamInfo.push(`${C.dim}Status:${C.reset} ${cacheStatus}`);
+            }
+
             renderBox(`▶ ${t('boxes.streamReady')}`, streamInfo, C.cyan);
 
             let selectedQuality = null;
