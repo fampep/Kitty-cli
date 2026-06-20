@@ -83,9 +83,9 @@ const defaultSettings = {
     confirmBeforeExit: false,
     language: "en",
     enabledProviders: [
-        "Miruro", "MKissa", "ReAnime", "KickAssAnime", "Animo", "AniZone", "Anikoto",
-        "AnimeGG", "Senshi", "Animetsu", "AnimeOnsen", "AllAnime", "Nyanime", "AniDao",
-        "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko", "Anizen"
+        "Miruro", "anitaku", "MKissa", "AniZone", "Anikoto",
+        "AnimeGG", "AllAnime", "Nyanime", "AniDao",
+        "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko"
     ]
 };
 
@@ -765,7 +765,7 @@ async function playWithMpv(stream, displayTitle, settings, animeTitle, episodeNu
             `--title=${playerTitle.substring(0, 200)}`
         ];
         if (stream.file && stream.file.includes('.m3u8')) {
-            baseArgs.push('--demuxer-lavf-o=analyzeduration=30000000,probesize=100000000,fflags=+discardcorrupt');
+            baseArgs.push('--demuxer-lavf-o=analyzeduration=60000000,probesize=200000000,fflags=+discardcorrupt+nobuffer');
         }
         if (fs.existsSync(subsDir)) {
             baseArgs.push(`--sub-file-paths=${subsDir}`);
@@ -1411,8 +1411,8 @@ async function fetchProviderList(apiBaseUrl) {
     } catch (err) {
         debugLog("Failed to fetch provider list from API, using fallback list.");
         return [
-            "Miruro", "MKissa", "ReAnime", "KickAssAnime", "Animo", "AniZone", "Anikoto",
-            "AnimeGG", "Senshi", "Animetsu", "AnimeOnsen", "AllAnime", "Nyanime", "AniDao",
+            "Miruro", "anitaku", "MKissa",  "AniZone", "Anikoto",
+            "AnimeGG", "AllAnime", "Nyanime", "AniDao",
             "Animeverse", "AnimeHeaven", "AniNeko", "AnimeParadise", "KaaLt", "AniDB", "Anineko"
         ];
     }
