@@ -1250,10 +1250,10 @@ class ApiProvider {
 
     async search(query, dub = false) {
         try {
-            const response = await axios.post(`${this.baseUrl}/api/v2/provider/${this.name}/query`, {
-                operation: "search",
-                query: { title: query, dub }
-            }, { timeout: 15000 });
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/search`, {
+                params: { q: query, dub: dub.toString() },
+                timeout: 15000
+            });
             return response.data;
         } catch (err) {
             debugLog(`API error for ${this.name}.search:`, err.message);
@@ -1261,12 +1261,12 @@ class ApiProvider {
         }
     }
 
-    async findEpisodes(seriesUrl, anilistId) {
+    async findEpisodes(seriesUrl) {
         try {
-            const response = await axios.post(`${this.baseUrl}/api/v2/provider/${this.name}/query`, {
-                operation: "episodes",
-                query: { anilistId: anilistId || seriesUrl }
-            }, { timeout: this.name === 'AniDB' ? 20000 : 15000 });
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/episodes`, {
+                params: { url: seriesUrl },
+                timeout: this.name === 'AniDB' ? 20000 : 15000
+            });
             let data = response.data;
             if (data && typeof data === 'object') {
                 if (Array.isArray(data)) return data;
@@ -1285,12 +1285,12 @@ class ApiProvider {
         }
     }
 
-    async findAvailableServers(anilistId, episode = 1, audio = 'sub') {
+    async findAvailableServers(dataIds, audio) {
         try {
-            const response = await axios.post(`${this.baseUrl}/api/v2/provider/${this.name}/query`, {
-                operation: "servers",
-                query: { anilistId, episode, audio }
-            }, { timeout: this.name === 'AniDB' ? 20000 : 15000 });
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/servers`, {
+                params: { dataIds, audio },
+                timeout: this.name === 'AniDB' ? 20000 : 15000
+            });
             return response.data || [];
         } catch (err) {
             debugLog(`API error for ${this.name}.findAvailableServers:`, err.message);
@@ -1345,10 +1345,10 @@ class ApiProvider {
                 return cached.data;
             }
 
-            const response = await axios.post(`${this.baseUrl}/api/v2/provider/${this.name}/stream`, {
-                type: "direct",
-                query: { anilistId: Number(anilistId), episode: episodeNumber, audio }
-            }, { timeout: 10000 });
+            const response = await axios.get(`${this.baseUrl}/provider/${this.name}/stream-direct`, {
+                params: { anilistId: String(anilistId), episode: episodeNumber, audio },
+                timeout: 10000 // Reduced from 15s to 10s for faster failure detection
+            });
             const stream = response.data;
 
             // Ensure file URL is properly set
@@ -1405,7 +1405,7 @@ class ApiProvider {
 
 async function fetchProviderList(apiBaseUrl) {
     try {
-        const response = await axios.get(`${apiBaseUrl}/api/v2/providers/status`, { timeout: 5000 });
+        const response = await axios.get(`${apiBaseUrl}/status`, { timeout: 5000 });
         const providers = response.data.providers || [];
         return providers.filter(p => p.online).map(p => p.name);
     } catch (err) {
